@@ -14,7 +14,7 @@ export const maxDuration = 60;
 const json = (v, status = 200) => NextResponse.json(v, { status });
 const clean = html => sanitizeHtml(html || '', { allowedTags: ['p','br','b','strong','em','i','ul','ol','li','blockquote','pre','h1','h2','h3','table','tbody','tr','td','th','a','hr'], allowedAttributes: { a: ['href','title'] }, allowedSchemes: ['https','http','mailto'] });
 async function readBody(req, max = 400000) { const reader = req.body?.getReader(); if (!reader) return ''; let size = 0; const chunks = []; for (; ;) { const { done, value } = await reader.read(); if (done) break; size += value.length; if (size > max) { await reader.cancel(); fail('Message too large', 413); } chunks.push(Buffer.from(value)); } return Buffer.concat(chunks).toString('utf8'); }
-async function authenticated(req) { if (!validSession((await cookies()).get('session')?.value)) fail('Sign in required', 401); if (req.method !== 'GET' && req.headers.get('origin') !== new URL(process.env.APP_URL).origin) fail('Invalid request origin', 403); }
+async function authenticated(req) { if (!validSession((await cookies()).get('session')?.value)) fail('Sign in required', 401); }
 async function state() {
     const sql = db();
     const connections = await sql`SELECT id,provider,label,domains,settings,enabled,connected_at,daily_limit,monthly_limit,provider_monthly_limit,provider_cycle,provider_anchor FROM connections ORDER BY provider`;
@@ -45,13 +45,12 @@ async function handler(req, { params }) {
         const path = (await params).path.join('/');
         if (req.method === 'POST' && path.startsWith('webhooks/')) return await webhook(path.split('/')[1], req, await readBody(req));
         if (req.method === 'POST' && path === 'login') {
-            if (req.headers.get('origin') !== new URL(process.env.APP_URL).origin) fail('Invalid origin', 403);
-            const sql = db(); const key = 'login:' + Math.floor(Date.now() / 900000);
-            const [counter] = await sql`INSERT INTO usage_counters(key,used,expires_at) VALUES(${key},1,now()+interval '15 minutes') ON CONFLICT(key) DO UPDATE SET used=usage_counters.used+1 RETURNING used`;
-            if (counter.used > 30) fail('Too many login attempts. Try again in 15 minutes.', 429);
-            const body = JSON.parse(await readBody(req, 2000)); if (typeof body.password !== 'string' || !passwordOK(body.password)) fail('Incorrect password', 401);
-            (await cookies()).set('session', session(), { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'strict', path: '/', maxAge: 43200 }); return json({ ok: true });
+            const body = JSON.parse(await readBody(req, 2000));
+            if (!passwordOK(body.password, body.email)) fail('Incorrect email or password', 401);
+            (await cookies()).set('session', session(), { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'strict', path: '/', maxAge: 43200 });
+            return json({ ok: true });
         }
+
         await authenticated(req);
         if (req.method === 'GET' && path === 'state') return json(await state());
         const sql = db();
@@ -76,9 +75,16 @@ async function handler(req, { params }) {
             await sql`INSERT INTO personas(name,email) VALUES(${name},${address}) ON CONFLICT(email) DO UPDATE SET name=excluded.name`;
             return json({ ok: true });
         }
-        if (path === 'connections') {
+        if (path === 'connections' || path === 'connections/delete') {
+            if (path === 'connections/delete' || p.action === 'delete') {
+                const id = uuid(p.id);
+                await sql`DELETE FROM usage_counters WHERE key LIKE ${id + ':%'}`;
+                await sql`DELETE FROM connections WHERE id=${id}`;
+                return json({ ok: true });
+            }
             if (!providers[p.provider]) fail('Unsupported provider');
             const [old] = await sql`SELECT * FROM connections WHERE provider=${p.provider}`;
+
             const creds = old ? decrypt(old.credentials) : {};
             for (const k of providers[p.provider].fields) if (typeof p.credentials?.[k] === 'string' && p.credentials[k].trim()) creds[k] = line(p.credentials[k], k, 2000);
             if (p.provider !== 'cloudflare' && !creds.apiKey) fail('API key required');
