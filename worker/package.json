@@ -1,0 +1,16 @@
+{
+  "name": "emailsender-inbound",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "test": "node --test worker.test.js"
+  },
+  "dependencies": {
+    "postal-mime": "^2.4.3"
+  },
+  "devDependencies": {
+    "wrangler": "^4.40.0"
+  }
+}

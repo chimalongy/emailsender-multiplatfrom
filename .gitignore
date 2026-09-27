@@ -1,0 +1,8 @@
+.next/
+node_modules/
+.env*
+db/d1-messages-import.sql
+!.env.example
+.vercel/
+worker/.dev.vars
+worker/.wrangler/
