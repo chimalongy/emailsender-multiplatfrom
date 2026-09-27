@@ -78,10 +78,12 @@ async function handler(req, { params }) {
         if (path === 'connections' || path === 'connections/delete') {
             if (path === 'connections/delete' || p.action === 'delete') {
                 const id = uuid(p.id);
+                try { await sql`UPDATE messages SET connection_id=NULL WHERE connection_id=${id}`; } catch {}
                 await sql`DELETE FROM usage_counters WHERE key LIKE ${id + ':%'}`;
                 await sql`DELETE FROM connections WHERE id=${id}`;
                 return json({ ok: true });
             }
+
             if (!providers[p.provider]) fail('Unsupported provider');
             const [old] = await sql`SELECT * FROM connections WHERE provider=${p.provider}`;
 
