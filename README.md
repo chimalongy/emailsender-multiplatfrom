@@ -27,8 +27,8 @@ No secrets use NEXT_PUBLIC_. API credentials are encrypted in Neon and are never
 
 ## Pages
 
-- Overview: enabled platforms, application usage, daily and monthly capacity, reset timestamps.
-- Connections: all eight senders, credentials, verified domains, editable quota settings, domain instructions and supported status checks. Save Cloudflare account/zone IDs and optional read token here too.
+- Overview: aggregate daily sent vs. sending capacity, monthly sent vs. monthly sending capacity based on connected platforms, and platform quota summary.
+- Connected: dedicated page with per-platform capacity meters, usage details, reset timestamps, setup status checks, and platform connection settings. Save Cloudflare account/zone IDs and optional read token here too.
 - Personas: name/email identities without provider assignments. Saving the same email updates its display name; personas can be edited or deleted.
 - Compose: one recipient, plain-text message, selected persona and selected provider. An escaped HTML alternative is generated server-side.
 - Mailbox: Inbox, Sent, paginated lists, conversation view, replies and manual message linking/reconciliation.
