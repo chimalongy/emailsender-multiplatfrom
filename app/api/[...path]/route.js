@@ -161,8 +161,12 @@ async function handler(req, { params }) {
 
         const known = ['Quota reached', 'Connection is disabled', 'Verify the persona domain', 'Persona not found'];
         if (known.some(x => e.message.includes(x))) return json({ error: e.message.split('\n')[0] }, 400);
+        if (e.message?.includes('unable to authenticate data') || e.message?.includes('Unsupported state')) {
+            return json({ error: 'Failed to decrypt provider credentials. CREDENTIALS_KEY in environment does not match the key used to save this connection. Please re-enter and save your API key in the Connections tab.' }, 400);
+        }
         if (e.code === '23505') return json({ error: 'That record already exists' }, 409);
-        return json({ error: e.status ? e.message : 'Request failed. Check environment settings/database setup. If sending was attempted, check Sent before retrying.' }, e.status || 500);
+        return json({ error: e.status ? e.message : `Request failed: ${e.message}` }, e.status || 500);
+
     }
 }
 export const GET = handler;
