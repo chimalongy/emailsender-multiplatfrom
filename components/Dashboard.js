@@ -1,13 +1,15 @@
 'use client';
 import {useEffect,useState} from 'react';
 import {providers} from '../lib/catalog.js';
+import {parseEmailList} from '../lib/validation.js';
 const fmt=d=>new Date(d).toLocaleString();
 async function api(path,body){const r=await fetch('/api/'+path,body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const d=await r.json();if(r.status===401){location.href='/login';throw Error('Sign in required');}if(!r.ok&&!(path==='send'&&d.status==='failed'))throw Error(d.error||'Request failed');return d;}
 const initialConnection=p=>({provider:p,label:providers[p].name,domains:'',credentials:{},dailyLimit:providers[p].daily??'',monthlyLimit:providers[p].monthly??'',providerMonthlyLimit:providers[p].providerMonthly??'',providerCycle:'calendar',providerAnchor:new Date().toISOString(),region:'us',enabled:false});
 export default function Dashboard(){
- const [page,setPage]=useState('Overview'),[connectedTab,setConnectedTab]=useState('capacity'),[data,setData]=useState({connections:[],personas:[]}),[error,setError]=useState(''),[notice,setNotice]=useState(''),[busy,setBusy]=useState(false),[loading,setLoading]=useState(true);
+ const [page,setPage]=useState('Overview'),[connectedTab,setConnectedTab]=useState('capacity'),[data,setData]=useState({connections:[],personas:[],campaigns:[]}),[error,setError]=useState(''),[notice,setNotice]=useState(''),[busy,setBusy]=useState(false),[loading,setLoading]=useState(true);
  const [connection,setConnection]=useState(initialConnection('brevo')),[inspect,setInspect]=useState(null),[persona,setPersona]=useState({name:'',email:''});
  const [compose,setCompose]=useState({id:'',personaId:'',connectionId:'',to:'',subject:'',text:'',parentId:null}),[folder,setFolder]=useState('inbox'),[offset,setOffset]=useState(0),[messages,setMessages]=useState([]),[thread,setThread]=useState([]);
+ const [selectedCampaignId,setSelectedCampaignId]=useState(null),[campaignForm,setCampaignForm]=useState({name:'',emails:''}),[campaignMsg,setCampaignMsg]=useState({personaId:'',connectionId:'',subject:'',text:''}),[editingRecipients,setEditingRecipients]=useState(false),[recipientEditText,setRecipientEditText]=useState('');
  async function refresh(){setData(await api('state'));}
  async function run(fn){setBusy(true);setError('');setNotice('');try{await fn();}catch(e){setError(e.message);}finally{setBusy(false);}}
  useEffect(()=>{refresh().catch(e=>setError(e.message)).finally(()=>setLoading(false));},[]);
@@ -46,9 +48,164 @@ export default function Dashboard(){
  function reply(m){const p=data.personas.find(p=>p.id===m.persona_id)||data.personas.find(p=>p.email===m.to_email)||data.personas[0];setCompose({id:crypto.randomUUID(),personaId:p?.id||'',connectionId:senders.find(c=>c.enabled)?.id||'',to:m.headers?.replyTo||m.from_email,subject:/^re:/i.test(m.subject)?m.subject:'Re: '+m.subject,text:'',parentId:m.id});setPage('Compose');}
  async function deletePersona(p){if(!confirm(`Delete persona "${p.name}" (${p.email})?`))return;await run(async()=>{await api('personas',{action:'delete',id:p.id});await refresh();if(persona.email===p.email)setPersona({name:'',email:''});if(compose.personaId===p.id)setCompose(c=>({...c,personaId:''}));setNotice(`Persona "${p.name}" deleted.`);});}
  async function deleteConnection(c){if(!confirm(`Delete connection "${c.label}" (${providers[c.provider]?.name||c.provider})? This will remove its settings and usage counters.`))return;await run(async()=>{await api('connections',{action:'delete',id:c.id});await refresh();setConnection(initialConnection('brevo'));setInspect(null);if(compose.connectionId===c.id)setCompose(prev=>({...prev,connectionId:''}));setNotice(`Connection "${c.label}" deleted.`);});}
- function navigate(p){setPage(p);setError('');setNotice('');if(p==='Compose'&&!compose.id)setCompose(c=>({...c,id:crypto.randomUUID()}));}
- return <div className="shell"><aside><a className="brand" href="/"><span className="brandmark">E</span>EmailSender<span className="branddot">.</span></a><p className="navlabel">WORKSPACE</p><nav>{[['Overview','◫'],['Connected','⇄'],['Personas','◎'],['Compose','↗'],['Mailbox','▤'],['Deployment','⌘']].map(([p,icon])=><button key={p} className={(page===p||(p==='Connected'&&page==='Connections'))?'active':''} onClick={()=>{if(p==='Connected')setConnectedTab('capacity');navigate(p);}}><span>{icon}</span>{p}{p==='Connected'&&<small>{senders.length}</small>}</button>)}</nav><div className="sidebarfoot"><span className="dot"/>Private workspace<p>Vercel · Neon · Cloudflare</p><button className="link" onClick={()=>run(async()=>{await api('logout',{});location.href='/login';})}>Sign out</button></div></aside><main><header><div><p className="eyebrow">EMAIL WORKSPACE / {(page==='Connections'?'CONNECTED':page).toUpperCase()}</p><h1>{({Overview:'Your mail, connected.',Connected:'Platform capacity and usage.',Connections:'Connect your platforms.',Personas:'Choose who you send as.',Compose:'A new conversation.',Mailbox:'Your conversations.',Deployment:'Ready to go live.'})[page]}</h1></div><button onClick={()=>navigate('Compose')}>+ Compose email</button></header>{error&&<div role="alert" className="alert error">{error}</div>}{notice&&<div role="status" className="alert success">{notice}</div>}{loading&&<p className="muted">Loading your workspace…</p>}
+ const selectedCampaign=(data.campaigns||[]).find(c=>c.id===selectedCampaignId);
+ const campaignSelectedPersona=data.personas.find(p=>p.id===campaignMsg.personaId);
+ async function createCampaign(e){e.preventDefault();const parsed=parseEmailList(campaignForm.emails);if(!parsed.length){setError('Please enter at least one valid recipient email address.');return;}await run(async()=>{const res=await api('campaigns',{name:campaignForm.name,recipients:parsed});await refresh();setCampaignForm({name:'',emails:''});setNotice(`Campaign "${campaignForm.name}" created with ${parsed.length} recipient${parsed.length===1?'':'s'}.`);if(res.campaign?.id){setSelectedCampaignId(res.campaign.id);setRecipientEditText((res.campaign.recipients||[]).join('\n'));}});}
+ async function deleteCampaign(c){if(!confirm(`Delete campaign "${c.name}"? This will also remove its campaign message history.`))return;await run(async()=>{await api('campaigns',{action:'delete',id:c.id});if(selectedCampaignId===c.id)setSelectedCampaignId(null);await refresh();setNotice(`Campaign "${c.name}" deleted.`);});}
+ async function saveRecipients(c){const parsed=parseEmailList(recipientEditText);if(!parsed.length){setError('Please enter at least one valid recipient email address.');return;}await run(async()=>{await api('campaigns',{action:'update',id:c.id,recipients:parsed});await refresh();setEditingRecipients(false);setNotice(`Updated "${c.name}" with ${parsed.length} recipient${parsed.length===1?'':'s'}.`);});}
+ async function sendCampaignBroadcast(e){e.preventDefault();if(!selectedCampaign||!selectedCampaign.recipients?.length){setError('No recipients found in this campaign.');return;}await run(async()=>{const res=await api('campaigns/send',{campaignId:selectedCampaign.id,personaId:campaignMsg.personaId,connectionId:campaignMsg.connectionId,subject:campaignMsg.subject,text:campaignMsg.text});await refresh();if(res.status==='completed'){setNotice(`Broadcast successfully delivered to all ${res.sentCount} recipient${res.sentCount===1?'':'s'}!`);setCampaignMsg(prev=>({...prev,subject:'',text:''}));}else if(res.status==='quota-stopped'){setNotice(`Sending paused: Quota limit reached on provider. ${res.sentCount} sent, ${res.total-res.sentCount} remaining. ${res.error||''}`);}else if(res.status==='partial'){setNotice(`Broadcast finished with issues: ${res.sentCount} sent, ${res.failedCount} failed. ${res.error||''}`);}else{setNotice(`Broadcast status: ${res.status}. ${res.error||''}`);}});}
+ function navigate(p){setPage(p);setError('');setNotice('');if(p==='Compose'&&!compose.id)setCompose(c=>({...c,id:crypto.randomUUID()}));if(p==='Campaigns')setSelectedCampaignId(null);}
+ return <div className="shell"><aside><a className="brand" href="/"><span className="brandmark">E</span>EmailSender<span className="branddot">.</span></a><p className="navlabel">WORKSPACE</p><nav>{[['Overview','◫'],['Campaigns','📢'],['Connected','⇄'],['Personas','◎'],['Compose','↗'],['Mailbox','▤'],['Deployment','⌘']].map(([p,icon])=><button key={p} className={(page===p||(p==='Connected'&&page==='Connections'))?'active':''} onClick={()=>{if(p==='Connected')setConnectedTab('capacity');if(p==='Campaigns')setSelectedCampaignId(null);navigate(p);}}><span>{icon}</span>{p}{p==='Connected'&&<small>{senders.length}</small>}{p==='Campaigns'&&<small>{(data.campaigns||[]).length}</small>}</button>)}</nav><div className="sidebarfoot"><span className="dot"/>Private workspace<p>Vercel · Neon · Cloudflare</p><button className="link" onClick={()=>run(async()=>{await api('logout',{});location.href='/login';})}>Sign out</button></div></aside><main><header><div><p className="eyebrow">EMAIL WORKSPACE / {(page==='Connections'?'CONNECTED':page).toUpperCase()}</p><h1>{({Overview:'Your mail, connected.',Campaigns:'Targeted email broadcasts.',Connected:'Platform capacity and usage.',Connections:'Connect your platforms.',Personas:'Choose who you send as.',Compose:'A new conversation.',Mailbox:'Your conversations.',Deployment:'Ready to go live.'})[page]}</h1></div><button onClick={()=>navigate('Compose')}>+ Compose email</button></header>{error&&<div role="alert" className="alert error">{error}</div>}{notice&&<div role="status" className="alert success">{notice}</div>}{loading&&<p className="muted">Loading your workspace…</p>}
  {page==='Overview'&&<><section className="stats"><div className="card"><p>Daily sent / Capacity</p><strong>{totalDailySent.toLocaleString()}<small> / {totalDailyCapacity>0?totalDailyCapacity.toLocaleString():'No limit'}</small></strong><progress max={totalDailyCapacity||1} value={totalDailyCapacity?totalDailySent:0}/><div style={{display:'flex',justifyContent:'space-between',fontSize:'11px',color:'var(--muted)',marginTop:'6px'}}><span>{totalDailyCapacity>0?`${Math.max(0,totalDailyCapacity-totalDailySent).toLocaleString()} remaining today`:'No daily cap'}</span><span>{dailyPercent}% used</span></div>{senders.length>0&&activeSenders.length!==senders.length&&<small style={{display:'block',marginTop:'5px',color:'#b07d12'}}>{activeDailyCapacity.toLocaleString()} active capacity ({activeSenders.length}/{senders.length} enabled)</small>}</div><div className="card"><p>Monthly sent / Capacity</p><strong>{totalMonthlySent.toLocaleString()}<small> / {totalMonthlyCapacity>0?totalMonthlyCapacity.toLocaleString():'No limit'}</small></strong><progress max={totalMonthlyCapacity||1} value={totalMonthlyCapacity?totalMonthlySent:0}/><div style={{display:'flex',justifyContent:'space-between',fontSize:'11px',color:'var(--muted)',marginTop:'6px'}}><span>{totalMonthlyCapacity>0?`${Math.max(0,totalMonthlyCapacity-totalMonthlySent).toLocaleString()} remaining`:'No monthly cap'}</span><span>{monthlyPercent}% used</span></div>{senders.length>0&&activeSenders.length!==senders.length&&<small style={{display:'block',marginTop:'5px',color:'#b07d12'}}>{activeMonthlyCapacity.toLocaleString()} active capacity ({activeSenders.length}/{senders.length} enabled)</small>}</div><div className="card"><p>Connected platforms</p><strong>{activeSenders.length}<small> / {senders.length} active</small></strong><p style={{fontSize:'12px',color:'var(--muted)',margin:'10px 0 10px'}}>{data.personas.length} persona{data.personas.length===1?'':'s'} configured</p><button className="link" onClick={()=>{setConnectedTab('capacity');navigate('Connected');}}>View platform details →</button></div></section><div className="sectiontitle"><div><h2>Sending capacity overview</h2><p className="muted">Combined sending quota calculated across your connected platforms.</p></div><div style={{display:'flex',gap:'10px'}}><button className="secondary" onClick={()=>run(refresh)}>Refresh</button><button onClick={()=>{setConnectedTab('capacity');navigate('Connected');}}>View Connected Page →</button></div></div>{!senders.length?<div className="empty card"><div className="emptyicon">⇄</div><h2>Your first connection starts here.</h2><p>Add a sending provider, verify your domain, then create your persona.</p><button onClick={()=>{setConnectedTab('settings');navigate('Connected');}}>Connect a platform →</button></div>:<div className="card" style={{padding:'24px'}}><div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',flexWrap:'wrap',gap:'16px',marginBottom:'20px'}}><div><h3 style={{fontSize:'17px',marginBottom:'4px'}}>Platforms Capacity Breakdown</h3><p className="muted" style={{margin:0}}>{senders.length} connected platform{senders.length===1?'':'s'} ({activeSenders.length} active) providing {totalDailyCapacity.toLocaleString()} daily and {totalMonthlyCapacity.toLocaleString()} monthly sending capacity.</p></div><button className="link" onClick={()=>{setConnectedTab('capacity');navigate('Connected');}}>Full platform meters & reset schedules →</button></div><div style={{display:'grid',gap:'10px'}}>{senders.map(c=>{const dUsed=getDailySent(c),dLimit=getDailyLimit(c),mUsed=getMonthlySent(c),mLimit=getMonthlyLimit(c);return <div key={c.id} style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'12px 16px',background:'var(--bg)',borderRadius:'8px',gap:'16px',flexWrap:'wrap'}}><div style={{display:'flex',alignItems:'center',gap:'10px',minWidth:'170px'}}><div><b style={{fontSize:'14px',display:'block'}}>{c.label}</b><span className="muted" style={{fontSize:'11px'}}>{c.domains.join(', ')}</span></div><span className={'badge '+(c.enabled?'green':'')} style={{marginLeft:'auto'}}>{c.enabled?'Enabled':'Paused'}</span></div><div style={{display:'flex',gap:'20px',fontSize:'12px',alignItems:'center'}}><div><span className="muted" style={{fontSize:'10px',display:'block',textTransform:'uppercase',letterSpacing:'0.5px'}}>Daily allowance</span><b>{dUsed} / {dLimit||'No cap'}</b></div><div><span className="muted" style={{fontSize:'10px',display:'block',textTransform:'uppercase',letterSpacing:'0.5px'}}>Monthly allowance</span><b>{mUsed} / {mLimit||'No cap'}</b></div></div><button className="link" style={{fontSize:'12px'}} onClick={()=>edit(c)}>Manage settings →</button></div>;})}</div><p className="footnote" style={{marginTop:'18px'}}>Quotas are shared by every persona. Provider approval, external usage, hourly limits and actual billing periods may reduce available capacity. For detailed per-platform usage meters and reset timestamps, visit the <button className="link" style={{display:'inline',padding:0,fontSize:'inherit'}} onClick={()=>{setConnectedTab('capacity');navigate('Connected');}}>Connected page</button>.</p></div>}</>}
+ {page==='Campaigns'&&<>
+  {selectedCampaign?(
+   <div>
+    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'20px',flexWrap:'wrap',gap:'12px'}}>
+     <div style={{display:'flex',alignItems:'center',gap:'12px'}}>
+      <button className="secondary" onClick={()=>{setSelectedCampaignId(null);setEditingRecipients(false);}}>← All Campaigns</button>
+      <h2 style={{margin:0}}>{selectedCampaign.name}</h2>
+     </div>
+     <div style={{display:'flex',gap:'12px',alignItems:'center'}}>
+      <span className="badge green">{selectedCampaign.recipients?.length||0} recipient{(selectedCampaign.recipients?.length===1)?'':'s'}</span>
+      <button type="button" className="link danger" disabled={busy} onClick={()=>deleteCampaign(selectedCampaign)}>Delete Campaign</button>
+     </div>
+    </div>
+    <div className="columns">
+     <form className="card form composer" onSubmit={sendCampaignBroadcast}>
+      <h3 style={{fontSize:'18px',marginBottom:'4px'}}>Send a message to this campaign</h3>
+      <p className="muted" style={{marginBottom:'16px'}}>A personalized individual copy will be sent to every recipient in this campaign.</p>
+      <div className="row">
+       <label>Sender persona
+        <select required value={campaignMsg.personaId} onChange={e=>setCampaignMsg({...campaignMsg,personaId:e.target.value})}>
+         <option value="">Choose a persona</option>
+         {data.personas.map(p=><option value={p.id} key={p.id}>{p.name} — {p.email}</option>)}
+        </select>
+       </label>
+       <label>Sending platform
+        <select required value={campaignMsg.connectionId} onChange={e=>setCampaignMsg({...campaignMsg,connectionId:e.target.value})}>
+         <option value="">Choose a platform</option>
+         {senders.map(c=><option key={c.id} value={c.id} disabled={!c.enabled||(!!campaignSelectedPersona&&!c.domains.includes(campaignSelectedPersona.email.split('@')[1]))}>
+          {c.label}{!c.enabled?' — paused':campaignSelectedPersona&&!c.domains.includes(campaignSelectedPersona.email.split('@')[1])?' — verify domain':''}
+         </option>)}
+        </select>
+       </label>
+      </div>
+      <label>Subject
+       <input required maxLength="255" value={campaignMsg.subject} onChange={e=>setCampaignMsg({...campaignMsg,subject:e.target.value})} placeholder="Subject line for campaign broadcast"/>
+      </label>
+      <label>Message
+       <textarea required rows="10" maxLength="100000" value={campaignMsg.text} onChange={e=>setCampaignMsg({...campaignMsg,text:e.target.value})} placeholder="Write the email message for your recipients…"/>
+      </label>
+      <div className="composerfoot">
+       <button type="button" className="secondary" disabled={busy} onClick={()=>setCampaignMsg(prev=>({...prev,subject:'',text:''}))}>Clear</button>
+       <p className="muted">Dispatched individually · Deduplicated · Tracked</p>
+       <button disabled={busy||!selectedCampaign.recipients?.length}>{busy?'Broadcasting…':`Send to all ${selectedCampaign.recipients?.length||0} recipients ↗`}</button>
+      </div>
+     </form>
+     <div style={{display:'flex',flexDirection:'column',gap:'20px'}}>
+      <div className="card">
+       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'12px'}}>
+        <div>
+         <h3 style={{margin:0}}>Recipients</h3>
+         <small className="muted">{selectedCampaign.recipients?.length||0} email address{(selectedCampaign.recipients?.length===1)?'':'es'}</small>
+        </div>
+        {!editingRecipients&&<button className="secondary" style={{padding:'6px 14px',fontSize:'12px'}} onClick={()=>{setRecipientEditText((selectedCampaign.recipients||[]).join('\n'));setEditingRecipients(true);}}>Edit / Add emails</button>}
+       </div>
+       {!editingRecipients?(
+        <div style={{maxHeight:'220px',overflowY:'auto',background:'var(--bg)',borderRadius:'8px',padding:'12px',display:'flex',flexWrap:'wrap',gap:'6px'}}>
+         {selectedCampaign.recipients?.map((addr,i)=><span key={i} className="badge" style={{background:'#fff',border:'1px solid var(--line)',fontSize:'12px',padding:'4px 9px'}}>{addr}</span>)}
+        </div>
+       ):(
+        <div className="form">
+         <label>Edit recipient emails (one per line, comma or semicolon)
+          <textarea rows="8" value={recipientEditText} onChange={e=>setRecipientEditText(e.target.value)} placeholder="alice@example.com&#10;bob@example.com"/>
+         </label>
+         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginTop:'10px'}}>
+          <small className="muted">{parseEmailList(recipientEditText).length} valid email(s)</small>
+          <div style={{display:'flex',gap:'8px'}}>
+           <button type="button" className="secondary" style={{padding:'6px 12px',fontSize:'12px'}} onClick={()=>setEditingRecipients(false)}>Cancel</button>
+           <button type="button" style={{padding:'6px 14px',fontSize:'12px'}} disabled={busy} onClick={()=>saveRecipients(selectedCampaign)}>Save recipients</button>
+          </div>
+         </div>
+        </div>
+       )}
+      </div>
+      <div className="card">
+       <h3 style={{marginBottom:'4px'}}>Messages sent to this campaign</h3>
+       <p className="muted" style={{fontSize:'12px',margin:'0 0 12px'}}>{(selectedCampaign.messages||[]).length} broadcast{(selectedCampaign.messages?.length===1)?'':'s'} dispatched</p>
+       {!(selectedCampaign.messages||[]).length?(
+        <p className="muted" style={{fontSize:'13px',margin:0}}>No messages sent yet. Use the composer on the left to send your first message to this campaign.</p>
+       ):(
+        <div style={{display:'grid',gap:'10px',maxHeight:'320px',overflowY:'auto'}}>
+         {selectedCampaign.messages.map(m=>(
+          <div key={m.id} style={{padding:'12px',background:'var(--bg)',borderRadius:'8px',border:'1px solid var(--line)'}}>
+           <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:'8px'}}>
+            <b style={{fontSize:'13px'}}>{m.subject}</b>
+            <span className={'badge '+(m.status==='completed'?'green':m.status==='quota-stopped'?'':m.status==='failed'?'danger':'')}>{m.status}</span>
+           </div>
+           <div style={{display:'flex',justifyContent:'space-between',fontSize:'11px',color:'var(--muted)',marginTop:'6px'}}>
+            <span>{m.sent_count} sent · {m.failed_count} failed ({m.total_recipients} total)</span>
+            <time>{fmt(m.created_at)}</time>
+           </div>
+           {m.text_body&&<p style={{fontSize:'12px',color:'var(--muted)',margin:'8px 0 0',maxHeight:'38px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{m.text_body}</p>}
+          </div>
+         ))}
+        </div>
+       )}
+      </div>
+     </div>
+    </div>
+   </div>
+  ):(
+   <div className="columns">
+    <section>
+     <div className="sectiontitle">
+      <h2>Your Campaigns</h2>
+      <button className="secondary" onClick={()=>run(refresh)}>Refresh</button>
+     </div>
+     {!(data.campaigns||[]).length?(
+      <div className="empty card">
+       <div className="emptyicon">📢</div>
+       <h2>No campaigns yet</h2>
+       <p>Create a campaign to group recipient emails and send broadcast messages in one click.</p>
+      </div>
+     ):(
+      <div style={{display:'grid',gap:'12px'}}>
+       {(data.campaigns||[]).map(c=>(
+        <div key={c.id} className="card" style={{padding:'18px'}}>
+         <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:'10px'}}>
+          <div>
+           <h3 style={{fontSize:'17px',margin:'0 0 4px'}}>{c.name}</h3>
+           <p className="muted" style={{fontSize:'12px',margin:0}}>Created {new Date(c.created_at).toLocaleDateString()} · {(c.messages||[]).length} broadcast{(c.messages?.length===1)?'':'s'}</p>
+          </div>
+          <span className="badge green">{(c.recipients||[]).length} recipient{(c.recipients?.length===1)?'':'s'}</span>
+         </div>
+         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginTop:'14px',paddingTop:'12px',borderTop:'1px solid var(--line)'}}>
+          <button onClick={()=>{setSelectedCampaignId(c.id);setRecipientEditText((c.recipients||[]).join('\n'));setEditingRecipients(false);}}>Open campaign & send →</button>
+          <button type="button" className="link danger" disabled={busy} onClick={()=>deleteCampaign(c)}>Delete</button>
+         </div>
+        </div>
+       ))}
+      </div>
+     )}
+    </section>
+    <form className="card form" onSubmit={createCampaign}>
+     <h2>Create a campaign</h2>
+     <label>Campaign name
+      <input required value={campaignForm.name} onChange={e=>setCampaignForm({...campaignForm,name:e.target.value})} placeholder="e.g. VIP Newsletter, Beta Users"/>
+     </label>
+     <label>Recipient emails (one per line, comma or semicolon separated)
+      <textarea required rows="10" value={campaignForm.emails} onChange={e=>setCampaignForm({...campaignForm,emails:e.target.value})} placeholder="alice@example.com&#10;bob@example.com&#10;carol@example.com"/>
+     </label>
+     <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'12px'}}>
+      <small className="muted">{parseEmailList(campaignForm.emails).length} valid email(s) detected</small>
+     </div>
+     <p className="muted">After creating your campaign, you can compose and send messages to all recipients.</p>
+     <button disabled={busy||!campaignForm.name.trim()||!parseEmailList(campaignForm.emails).length}>Create campaign</button>
+    </form>
+   </div>
+  )}
+ </>}
  {(page==='Connected'||page==='Connections')&&<><div className="sectiontitle" style={{marginBottom:'24px'}}><div className="tabs"><button className={connectedTab==='capacity'?'selected':''} onClick={()=>setConnectedTab('capacity')}>Platform Capacity & Usage</button><button className={connectedTab==='settings'?'selected':''} onClick={()=>setConnectedTab('settings')}>Platform Settings & Connect</button></div>{connectedTab==='capacity'?<div style={{display:'flex',gap:'10px'}}><button className="secondary" onClick={()=>run(refresh)}>Refresh</button><button onClick={()=>{setConnection(initialConnection('brevo'));setInspect(null);setConnectedTab('settings');}}>＋ New platform</button></div>:<button className="secondary" onClick={()=>run(refresh)}>Refresh</button>}</div>{connectedTab==='capacity'&&<>{!senders.length?<div className="empty card"><div className="emptyicon">⇄</div><h2>Your first connection starts here.</h2><p>Add a sending provider, verify your domain, then create your persona.</p><button onClick={()=>setConnectedTab('settings')}>Connect a platform →</button></div>:<div className="providergrid">{senders.map(c=><div className="card" key={c.id}><div className="cardtitle"><div><h3 style={{marginBottom:'2px'}}>{c.label}</h3><small style={{color:'var(--muted)'}}>{providers[c.provider]?.name||c.provider}</small></div><span className={'badge '+(c.enabled?'green':'')}>{c.enabled?'Enabled':'Paused'}</span></div><p className="muted" style={{marginTop:'8px',marginBottom:'12px'}}>{c.domains.join(', ')}</p>{c.usage.map(w=><div className="meter" key={w.name}><div><span>{w.name==='30-day'?'Your 30-day period':w.name==='provider-month'?'Provider month':'Today (UTC)'}</span><b>{w.used} / {w.limit??'No app cap'}</b></div><progress max={w.limit||1} value={w.limit?w.used:0}/><small>{w.limit?`${Math.max(0,w.limit-w.used)} remaining · `:''}Resets {fmt(w.end)}</small></div>)}<div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginTop:'14px',paddingTop:'12px',borderTop:'1px solid var(--line)'}}><button className="link" onClick={()=>edit(c)}>Manage settings →</button><div style={{display:'flex',gap:'12px',alignItems:'center'}}><button type="button" className="link" disabled={busy} onClick={()=>run(async()=>setInspect(await api('inspect',{id:c.id})))}>Check setup</button><button type="button" className="link danger" disabled={busy} onClick={()=>deleteConnection(c)}>Delete</button></div></div>{inspect&&inspect.id===c.id&&<pre className="code" style={{marginTop:'12px'}}>{JSON.stringify(inspect,null,2)}</pre>}</div>)}</div>}<p className="footnote">Quotas are shared by every persona. Provider approval, external usage, hourly limits and actual billing periods may reduce available capacity.</p></>}{connectedTab==='settings'&&<div className="columns"><section><div className="sectiontitle"><h2>Connected accounts</h2><button className="secondary" onClick={()=>{setConnection(initialConnection('brevo'));setInspect(null);}}>＋ New</button></div>{data.connections.map(c=><div className="connectionrow card" key={c.id}><div style={{flex:1,cursor:'pointer'}} onClick={()=>edit(c)}><b>{c.label}</b><p>{c.domains.join(', ')}</p></div><div className="connectionbtns"><span className={'badge '+(c.enabled?'green':'')}>{c.enabled?'Enabled':'Paused'}</span><button type="button" className="link danger" disabled={busy} onClick={()=>deleteConnection(c)}>Delete</button></div></div>)}{!data.connections.length&&<p className="muted">Your connected accounts will appear here.</p>}<div className="hint">One connection per platform keeps account quotas shared. Add all verified domains to that connection.</div></section><form className="card form" onSubmit={e=>{e.preventDefault();run(async()=>{await api('connections',connection);await refresh();setNotice('Connection saved. Existing credentials and tracking start date are preserved.');setConnection(c=>({...c,credentials:{}}));});}}><h2>Platform settings</h2><label>Platform<select value={connection.provider} onChange={e=>{const existing=data.connections.find(c=>c.provider===e.target.value);existing?edit(existing):setConnection(initialConnection(e.target.value));setInspect(null);}}>{Object.entries(providers).map(([id,p])=><option key={id} value={id}>{p.name}</option>)}</select></label><label>Connection name<input required value={connection.label} onChange={e=>field('label',e.target.value)}/></label><label>Verified domains (comma separated)<input required placeholder="yourdomain.com" value={connection.domains} onChange={e=>field('domains',e.target.value)}/></label><div className="hint"><b>Domain setup</b><p>{providers[connection.provider].steps}</p><a href={providers[connection.provider].url} target="_blank" rel="noreferrer">Official instructions ↗</a></div>{providers[connection.provider].fields.map(k=><label key={k}>{({apiKey:connection.provider==='cloudflare'?'Cloudflare API token (optional)':'API / sending key',apiSecret:'API secret',domainId:'Domain ID (for status check)',webhookSecret:'Webhook signing secret (optional)',sendingDomain:'Mailgun sending domain',accountId:'Cloudflare account ID',zoneId:'Cloudflare zone ID'})[k]}<input type={/Key|Secret/.test(k)?'password':'text'} autoComplete="off" value={connection.credentials[k]||''} placeholder="Leave blank to keep saved value" onChange={e=>field('credentials',{...connection.credentials,[k]:e.target.value})}/></label>)}{connection.provider==='mailgun'&&<label>Region<select value={connection.region} onChange={e=>field('region',e.target.value)}><option value="us">US</option><option value="eu">EU</option></select></label>}{connection.provider!=='cloudflare'&&<><div className="row"><label>Daily limit<input type="number" min="1" value={connection.dailyLimit} onChange={e=>field('dailyLimit',e.target.value)}/></label><label>Your 30-day limit<input type="number" min="1" value={connection.monthlyLimit} onChange={e=>field('monthlyLimit',e.target.value)}/></label></div><details><summary>Provider billing period</summary><label>Provider monthly limit<input type="number" min="1" value={connection.providerMonthlyLimit} onChange={e=>field('providerMonthlyLimit',e.target.value)}/></label><label>Provider reset rule<select value={connection.providerCycle} onChange={e=>field('providerCycle',e.target.value)}><option value="calendar">Calendar month (UTC)</option><option value="30days">Every 30 days from provider period start</option><option value="billing">Monthly anniversary of provider period start</option></select></label><label>Provider period start (UTC ISO date)<input value={connection.providerAnchor} onChange={e=>field('providerAnchor',e.target.value)}/></label><p className="muted">Set this from your provider dashboard. Pause before changing it. Blank limits mean no app cap; they do not remove provider limits.</p></details></>}<p className="muted">{providers[connection.provider].note}</p><label className="check"><input type="checkbox" checked={connection.enabled} onChange={e=>field('enabled',e.target.checked)}/>I completed domain verification and want this connection enabled.</label><div className="row"><button disabled={busy}>Save connection</button><button type="button" className="secondary" disabled={busy||!data.connections.some(c=>c.provider===connection.provider)} onClick={()=>run(async()=>setInspect(await api('inspect',{id:data.connections.find(c=>c.provider===connection.provider).id})))}>Check setup</button>{data.connections.some(c=>c.provider===connection.provider)&&<button type="button" className="secondary danger" disabled={busy} onClick={()=>deleteConnection(data.connections.find(c=>c.provider===connection.provider))}>Delete connection</button>}</div>{inspect&&<pre className="code">{JSON.stringify(inspect,null,2)}</pre>}</form></div>}</>}
  {page==='Personas'&&<div className="columns"><section><h2>Your sender identities</h2>{data.personas.map(p=><div className="card person" key={p.id}><div className="avatar">{p.name.slice(0,1).toUpperCase()}</div><div><h3>{p.name}</h3><p>{p.email}</p><small>Access to all sending connections</small></div><div className="personbtns"><button type="button" className="link" onClick={()=>setPersona({name:p.name,email:p.email})}>Edit name</button><button type="button" className="link danger" disabled={busy} onClick={()=>deletePersona(p)}>Delete</button></div></div>)}{!data.personas.length&&<p className="muted">Create your first sender persona.</p>}</section><form className="card form" onSubmit={e=>{e.preventDefault();run(async()=>{await api('personas',persona);await refresh();setPersona({name:'',email:''});setNotice('Persona saved and available across all sending platforms.');});}}><h2>Create a persona</h2><label>Sender name<input required value={persona.name} onChange={e=>setPersona({...persona,name:e.target.value})} placeholder="Chima"/></label><label>Sender email<input type="email" required value={persona.email} onChange={e=>setPersona({...persona,email:e.target.value})} placeholder="chima@yourdomain.com"/></label><p className="muted">No platform assignment needed. The sender domain must be verified on the platform you choose at send time.</p><button disabled={busy}>Save persona</button></form></div>}
  {page==='Compose'&&<form className="card form composer" onSubmit={e=>{e.preventDefault();run(async()=>{const id=compose.id||crypto.randomUUID();setCompose(c=>({...c,id}));const r=await api('send',{...compose,id});await refresh();if(r.status==='accepted'){setNotice('Accepted by the provider. Saved in Sent.');setCompose(c=>({...c,id:crypto.randomUUID(),text:'',subject:'',parentId:null}));}else {setCompose(c=>({...c,id:crypto.randomUUID()}));setNotice(`Status: ${r.status}. ${r.status==='failed'?'Correct the provider issue before retrying.':'Check Sent and provider logs before trying again.'} ${r.error||''}`);}});}}><div className="row"><label>Sender persona<select required value={compose.personaId} onChange={e=>setCompose({...compose,personaId:e.target.value})}><option value="">Choose a persona</option>{data.personas.map(p=><option value={p.id} key={p.id}>{p.name} — {p.email}</option>)}</select></label><label>Sending platform<select required value={compose.connectionId} onChange={e=>setCompose({...compose,connectionId:e.target.value})}><option value="">Choose a platform</option>{senders.map(c=><option key={c.id} value={c.id} disabled={!c.enabled||!!selectedPersona&&!c.domains.includes(selectedPersona.email.split('@')[1])}>{c.label}{!c.enabled?' — paused':selectedPersona&&!c.domains.includes(selectedPersona.email.split('@')[1])?' — verify domain':''}</option>)}</select></label></div>{['gosend','sequenzy'].includes(senders.find(c=>c.id===compose.connectionId)?.provider)&&<div className="hint">This platform does not document custom threading headers. Your app can retain the reply relationship, but the recipient’s mail client may show a separate conversation. GoSend also lacks documented custom Reply-To support.</div>}<label>To<input type="email" required value={compose.to} onChange={e=>setCompose({...compose,to:e.target.value})} placeholder="recipient@example.com"/></label><label>Subject<input required maxLength="255" value={compose.subject} onChange={e=>setCompose({...compose,subject:e.target.value})} placeholder="What would you like to say?"/></label><label>Message<textarea required rows="14" maxLength="100000" value={compose.text} onChange={e=>setCompose({...compose,text:e.target.value})} placeholder="Write your message…"/></label><div className="composerfoot"><button type="button" className="secondary" disabled={busy} onClick={()=>setCompose(c=>({...c,id:crypto.randomUUID(),to:'',subject:'',text:'',parentId:null}))}>New message</button><p className="muted">One recipient per send · Saved to Sent automatically</p><button disabled={busy}>{busy?'Sending…':'Send email ↗'}</button></div></form>}

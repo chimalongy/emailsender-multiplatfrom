@@ -1,12 +1,12 @@
 import { NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
-import { randomBytes, createHash, createHmac } from 'node:crypto';
+import { randomBytes, randomUUID, createHash, createHmac } from 'node:crypto';
 import sanitizeHtml from 'sanitize-html';
 import { db } from '../../../lib/db.js';
 import { decrypt, encrypt, equal, passwordOK, session, validSession } from '../../../lib/security.js';
 import { providers } from '../../../lib/catalog.js';
 import { buildRequest, inspectDomain, sendEmail } from '../../../lib/providers.js';
-import { domain, email, fail, line, limit, uuid } from '../../../lib/validation.js';
+import { domain, email, fail, line, limit, uuid, parseEmailList } from '../../../lib/validation.js';
 import { messageStore } from '../../../lib/d1.js';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -15,11 +15,52 @@ const json = (v, status = 200) => NextResponse.json(v, { status });
 const clean = html => sanitizeHtml(html || '', { allowedTags: ['p','br','b','strong','em','i','ul','ol','li','blockquote','pre','h1','h2','h3','table','tbody','tr','td','th','a','hr'], allowedAttributes: { a: ['href','title'] }, allowedSchemes: ['https','http','mailto'] });
 async function readBody(req, max = 400000) { const reader = req.body?.getReader(); if (!reader) return ''; let size = 0; const chunks = []; for (; ;) { const { done, value } = await reader.read(); if (done) break; size += value.length; if (size > max) { await reader.cancel(); fail('Message too large', 413); } chunks.push(Buffer.from(value)); } return Buffer.concat(chunks).toString('utf8'); }
 async function authenticated(req) { if (!validSession((await cookies()).get('session')?.value)) fail('Sign in required', 401); }
+let campaignTablesChecked = false;
+async function ensureCampaignTables(sql) {
+    if (campaignTablesChecked) return;
+    await sql`
+        CREATE TABLE IF NOT EXISTS campaigns (
+            id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+            name text NOT NULL,
+            recipients jsonb NOT NULL DEFAULT '[]',
+            created_at timestamptz NOT NULL DEFAULT now()
+        );
+    `;
+    await sql`
+        CREATE TABLE IF NOT EXISTS campaign_messages (
+            id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+            campaign_id uuid NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+            subject text NOT NULL,
+            text_body text NOT NULL,
+            persona_id uuid,
+            connection_id uuid,
+            total_recipients int NOT NULL DEFAULT 0,
+            sent_count int NOT NULL DEFAULT 0,
+            failed_count int NOT NULL DEFAULT 0,
+            status text NOT NULL DEFAULT 'pending',
+            created_at timestamptz NOT NULL DEFAULT now()
+        );
+    `;
+    campaignTablesChecked = true;
+}
 async function state() {
     const sql = db();
+    await ensureCampaignTables(sql);
     const connections = await sql`SELECT id,provider,label,domains,settings,enabled,connected_at,daily_limit,monthly_limit,provider_monthly_limit,provider_cycle,provider_anchor FROM connections ORDER BY provider`;
     const usage = await sql`SELECT c.id,w.value || jsonb_build_object('used',coalesce(u.used,0)) AS window FROM connections c CROSS JOIN LATERAL jsonb_array_elements(quota_windows(c)) w LEFT JOIN usage_counters u ON u.key=c.id::text||':'||(w.value->>'name')||':'||(w.value->>'start') WHERE c.provider<>'cloudflare'`;
-    return { connections: connections.map(c => ({ ...c, usage: usage.filter(u => u.id === c.id).map(u => u.window) })), personas: await sql`SELECT * FROM personas ORDER BY name`, providers };
+    const campaigns = await sql`SELECT * FROM campaigns ORDER BY created_at DESC`;
+    const campaignMessages = await sql`SELECT * FROM campaign_messages ORDER BY created_at DESC`;
+    const campaignsWithMessages = campaigns.map(c => ({
+        ...c,
+        recipients: Array.isArray(c.recipients) ? c.recipients : JSON.parse(c.recipients || '[]'),
+        messages: campaignMessages.filter(m => m.campaign_id === c.id)
+    }));
+    return {
+        connections: connections.map(c => ({ ...c, usage: usage.filter(u => u.id === c.id).map(u => u.window) })),
+        personas: await sql`SELECT * FROM personas ORDER BY name`,
+        campaigns: campaignsWithMessages,
+        providers
+    };
 }
 async function webhook(provider, req, raw) {
     const sql = db(); const [c] = await sql`SELECT * FROM connections WHERE provider=${provider}`; if (!c) fail('Unknown webhook', 404);
@@ -153,6 +194,158 @@ async function handler(req, { params }) {
             await sql`SELECT finish_email(${id},'accepted',${outcome.providerId},${outcome.messageId},null)`;
             await messageStore('updateMessage',{id,status:'accepted',provider_id:outcome.providerId,message_id:outcome.messageId});
             return json({ id, status: 'accepted' });
+        }
+        if (path === 'campaigns' || path === 'campaigns/delete') {
+            await ensureCampaignTables(sql);
+            if (path === 'campaigns/delete' || p.action === 'delete') {
+                const id = uuid(p.id);
+                await sql`DELETE FROM campaigns WHERE id=${id}`;
+                return json({ ok: true });
+            }
+            if (p.action === 'update') {
+                const id = uuid(p.id);
+                const [existing] = await sql`SELECT * FROM campaigns WHERE id=${id}`;
+                if (!existing) fail('Campaign not found', 404);
+                const name = p.name !== undefined ? line(p.name, 'name', 100) : existing.name;
+                const recipients = p.recipients !== undefined ? parseEmailList(p.recipients) : (Array.isArray(existing.recipients) ? existing.recipients : JSON.parse(existing.recipients || '[]'));
+                const [updated] = await sql`UPDATE campaigns SET name=${name}, recipients=${JSON.stringify(recipients)}::jsonb WHERE id=${id} RETURNING *`;
+                return json({ ok: true, campaign: updated });
+            }
+            const name = line(p.name, 'name', 100);
+            const recipients = parseEmailList(p.recipients || p.emails || []);
+            const [inserted] = await sql`INSERT INTO campaigns(name, recipients) VALUES(${name}, ${JSON.stringify(recipients)}::jsonb) RETURNING *`;
+            return json({ ok: true, campaign: inserted });
+        }
+        if (path === 'campaigns/send') {
+            await ensureCampaignTables(sql);
+            const campaignId = uuid(p.campaignId);
+            const [campaign] = await sql`SELECT * FROM campaigns WHERE id=${campaignId}`;
+            if (!campaign) fail('Campaign not found', 404);
+
+            const recipients = Array.isArray(campaign.recipients) ? campaign.recipients : JSON.parse(campaign.recipients || '[]');
+            if (!recipients.length) fail('Campaign has no recipient emails', 400);
+
+            const subject = line(p.subject, 'subject');
+            if (typeof p.text !== 'string' || !p.text.trim() || p.text.length > 100000) fail('Message body is required (maximum 100,000 characters)');
+
+            const [c] = await sql`SELECT * FROM connections WHERE id=${uuid(p.connectionId)}`;
+            const [persona] = await sql`SELECT * FROM personas WHERE id=${uuid(p.personaId)}`;
+            if (!c || !persona) fail('Choose a persona and connection');
+            if (!c.enabled) fail('Selected connection is paused');
+            const senderDomain = persona.email.split('@')[1];
+            if (!c.domains.includes(senderDomain)) fail('Verify the persona domain on this provider first');
+
+            const [campaignMsg] = await sql`
+                INSERT INTO campaign_messages(campaign_id, subject, text_body, persona_id, connection_id, total_recipients, status)
+                VALUES(${campaign.id}, ${subject}, ${p.text}, ${persona.id}, ${c.id}, ${recipients.length}, 'sending')
+                RETURNING *
+            `;
+
+            const credentials = decrypt(c.credentials);
+            const [inbound] = await sql`SELECT id FROM connections WHERE provider='cloudflare' AND enabled AND domains ? ${senderDomain}`;
+
+            let sentCount = 0;
+            let failedCount = 0;
+            let quotaHit = false;
+            let lastError = null;
+
+            for (const recipient of recipients) {
+                try {
+                    const sup = await messageStore('suppressed', { email: recipient });
+                    if (sup && sup.blocked) {
+                        failedCount++;
+                        continue;
+                    }
+                } catch {}
+
+                const msgId = randomUUID();
+                const token = randomBytes(16).toString('hex');
+                const replyTo = inbound ? `reply+${token}@${senderDomain}` : persona.email;
+                const payload = { id: msgId, from: persona.email, fromName: persona.name, to: recipient, subject, text: p.text, html: '', replyTo, headers: {} };
+
+                let reservation;
+                try {
+                    const [res] = await sql`SELECT reserve_email(${c.id},${persona.id},${msgId},null,${recipient},${subject},${p.text},'',${JSON.stringify({})}::jsonb,${token},null) AS result`;
+                    reservation = res.result;
+                } catch (e) {
+                    if (e.message && e.message.includes('Quota reached')) {
+                        quotaHit = true;
+                        lastError = e.message;
+                        break;
+                    }
+                    failedCount++;
+                    lastError = e.message;
+                    continue;
+                }
+
+                if (reservation?.duplicate) {
+                    continue;
+                }
+
+                const reservationKeys = reservation?.reservation || [];
+                try {
+                    await messageStore('insertOutbound', {
+                        message: {
+                            id: msgId,
+                            connection_id: c.id,
+                            persona_id: persona.id,
+                            thread_id: msgId,
+                            parent_id: null,
+                            from_email: persona.email,
+                            from_name: persona.name,
+                            to_email: recipient,
+                            subject,
+                            text_body: p.text,
+                            html_body: '',
+                            headers: {},
+                            message_id: null,
+                            reply_token: token,
+                            status: 'sending',
+                            reservation: reservationKeys
+                        }
+                    });
+                } catch (e) {
+                    await sql`SELECT finish_email(${msgId}, 'failed', null, null, ${e.message})`;
+                    failedCount++;
+                    lastError = e.message;
+                    continue;
+                }
+
+                try {
+                    const outcome = await sendEmail(c.provider, credentials, payload, c.settings);
+                    await sql`SELECT finish_email(${msgId}, 'accepted', ${outcome.providerId}, ${outcome.messageId}, null)`;
+                    await messageStore('updateMessage', { id: msgId, status: 'accepted', provider_id: outcome.providerId, message_id: outcome.messageId });
+                    sentCount++;
+                } catch (e) {
+                    const status = e.uncertain === false ? 'failed' : 'unknown';
+                    await sql`SELECT finish_email(${msgId}, ${status}, null, null, ${e.message})`;
+                    await messageStore('updateMessage', { id: msgId, status, error: e.message });
+                    if (status === 'failed') failedCount++;
+                    else sentCount++;
+                    lastError = e.message;
+                }
+            }
+
+            let finalStatus = 'completed';
+            if (quotaHit) finalStatus = 'quota-stopped';
+            else if (failedCount > 0 && sentCount === 0) finalStatus = 'failed';
+            else if (failedCount > 0) finalStatus = 'partial';
+
+            await sql`
+                UPDATE campaign_messages
+                SET sent_count=${sentCount}, failed_count=${failedCount}, status=${finalStatus}
+                WHERE id=${campaignMsg.id}
+            `;
+
+            return json({
+                ok: true,
+                campaignMessageId: campaignMsg.id,
+                sentCount,
+                failedCount,
+                total: recipients.length,
+                status: finalStatus,
+                error: lastError
+            });
         }
         fail('Not found', 404);
     } catch (e) {

@@ -5,7 +5,7 @@ import {randomUUID} from 'node:crypto';
 import {PGlite} from '@electric-sql/pglite';
 import {encrypt,decrypt,session,validSession,signature,inboundOK} from '../lib/security.js';
 import {buildRequest,sendEmail} from '../lib/providers.js';
-import {email,domain} from '../lib/validation.js';
+import {email,domain,parseEmailList} from '../lib/validation.js';
 test('credentials store as JSON and decrypt accurately',()=>{const a=encrypt({apiKey:'secret'});assert.deepEqual(decrypt(a),{apiKey:'secret'});});
 test('session validates and expires',()=>{const s=session();assert.ok(validSession(s));assert.ok(!validSession('expired'));});
 
@@ -42,6 +42,31 @@ test('Neon quota reservations, failures, retries and billing cycles (messages st
  await pg.query('DELETE FROM usage_counters WHERE key LIKE $1',[cid+':%']);
  await pg.query('DELETE FROM connections WHERE id=$1',[cid]);
  assert.equal((await pg.query('SELECT count(*) AS n FROM connections WHERE id=$1',[cid])).rows[0].n,0);
+
+ const campId = randomUUID();
+ await pg.query(`INSERT INTO campaigns(id,name,recipients) VALUES($1,'Beta Users','["alice@example.com","bob@example.com"]')`,[campId]);
+ const msgId = randomUUID();
+ await pg.query(`INSERT INTO campaign_messages(id,campaign_id,subject,text_body,total_recipients,status) VALUES($1,$2,'Welcome','Hello all',2,'completed')`,[msgId,campId]);
+ assert.equal((await pg.query('SELECT count(*) AS n FROM campaigns WHERE id=$1',[campId])).rows[0].n,1);
+ assert.equal((await pg.query('SELECT count(*) AS n FROM campaign_messages WHERE campaign_id=$1',[campId])).rows[0].n,1);
+ await pg.query('DELETE FROM campaigns WHERE id=$1',[campId]);
+ assert.equal((await pg.query('SELECT count(*) AS n FROM campaigns WHERE id=$1',[campId])).rows[0].n,0);
+ assert.equal((await pg.query('SELECT count(*) AS n FROM campaign_messages WHERE campaign_id=$1',[campId])).rows[0].n,0);
+
  await pg.close();
+});
+
+test('parseEmailList validates, normalizes, deduplicates from various delimiters', () => {
+ const input = `
+   alice@example.com
+   BOB@example.com, Charlie@Example.com;
+   alice@example.com
+   invalid-email
+   dan@example.org
+ `;
+ const result = parseEmailList(input);
+ assert.deepEqual(result, ['alice@example.com', 'bob@example.com', 'charlie@example.com', 'dan@example.org']);
+ assert.deepEqual(parseEmailList(['test@a.com', 'TEST@A.COM']), ['test@a.com']);
+ assert.deepEqual(parseEmailList(null), []);
 });
 
