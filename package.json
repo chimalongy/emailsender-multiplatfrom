@@ -12,14 +12,16 @@
     "export:messages": "node scripts/export-messages.js"
   },
   "dependencies": {
+    "@neondatabase/serverless": "^1.0.2",
+    "@trigger.dev/sdk": "^4.6.4",
     "next": "16.3.6",
     "react": "19.3.0",
     "react-dom": "19.3.0",
-    "@neondatabase/serverless": "^1.0.2",
     "sanitize-html": "^2.17.0"
   },
   "devDependencies": {
-    "@electric-sql/pglite": "^0.3.14"
+    "@electric-sql/pglite": "^0.3.14",
+    "@trigger.dev/build": "^4.6.4"
   },
   "engines": {
     "node": ">=22"

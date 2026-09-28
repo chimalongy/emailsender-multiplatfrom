@@ -6,3 +6,5 @@ db/d1-messages-import.sql
 .vercel/
 worker/.dev.vars
 worker/.wrangler/
+
+.trigger
