@@ -5,7 +5,6 @@ Reviewed 23 September 2026 against official documentation. Plans and account app
 | Provider | Daily default | 30-day app default | Credentials |
 |---|---:|---:|---|
 | Brevo | 300 | 9,000 | API key |
-| Mailjet | 200 | 6,000 | API key + secret |
 | Resend | 100 | 3,000 | API key; optional domain ID and webhook secret |
 | Mailgun | 100 | 3,000 | API key + sending domain + US/EU; optional webhook key |
 | Elastic Email | 100 | 3,000 | API key with SendHttp |
@@ -22,14 +21,6 @@ In Settings, open Senders/Domains, add your domain and publish its ownership and
 Sending uses `POST https://api.brevo.com/v3/smtp/email` with `api-key`. The API supports replyTo and headers and returns messageId. Free allowance: 300/day.
 
 Sources: [Domain verification](https://developers.brevo.com/docs/domain-authentication-and-verification), [Sending API](https://developers.brevo.com/docs/send-a-transactional-email), [Free-plan limits](https://help.brevo.com/hc/en-us/articles/208580669-FAQs-What-are-the-limits-of-the-Free-plan).
-
-## Mailjet
-
-Open Account settings → Senders & Domains, add and validate the domain, and publish the exact SPF/DKIM records shown. Copy the API key and secret from API Key Management. Add the domain and credentials in Connections, then enable after dashboard verification. Verification can apply to the API key/subaccount used; ensure you use the matching key.
-
-Sending uses `POST https://api.mailjet.com/v3.1/send` with HTTP Basic authentication. Sender identity, ReplyTo and custom headers are mapped to Mailjet's message fields. Its resource IDs are not assumed to be wire Message-IDs. Free allowance: 200/day and 6,000/month; contact limits can also apply.
-
-Sources: [Email API](https://dev.mailjet.com/docs/email-api/), [Headers](https://dev.mailjet.com/docs/email-api/send-api-v31/add-email-headers), [Limits](https://documentation.mailjet.com/hc/en-us/articles/360043048393-What-is-this-200-emails-per-day-limit-on-free-accounts).
 
 ## Resend
 

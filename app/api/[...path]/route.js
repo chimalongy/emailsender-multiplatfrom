@@ -90,7 +90,6 @@ async function handler(req, { params }) {
             const creds = old ? decrypt(old.credentials) : {};
             for (const k of providers[p.provider].fields) if (typeof p.credentials?.[k] === 'string' && p.credentials[k].trim()) creds[k] = line(p.credentials[k], k, 2000);
             if (p.provider !== 'cloudflare' && !creds.apiKey) fail('API key required');
-            if (p.provider === 'mailjet' && !creds.apiSecret) fail('API secret required');
             if (p.provider === 'mailgun') creds.sendingDomain = domain(creds.sendingDomain);
             const domains = [...new Set(String(p.domains || '').split(',').map(x => domain(x.trim())))];
             const settings = { region: p.region === 'eu' ? 'eu' : 'us' };
