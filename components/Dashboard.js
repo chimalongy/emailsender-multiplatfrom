@@ -9,7 +9,7 @@ export default function Dashboard(){
  const [page,setPage]=useState('Overview'),[connectedTab,setConnectedTab]=useState('capacity'),[data,setData]=useState({connections:[],personas:[],campaigns:[]}),[error,setError]=useState(''),[notice,setNotice]=useState(''),[busy,setBusy]=useState(false),[loading,setLoading]=useState(true);
  const [connection,setConnection]=useState(initialConnection('brevo')),[inspect,setInspect]=useState(null),[persona,setPersona]=useState({name:'',email:''});
  const [compose,setCompose]=useState({id:'',personaId:'',connectionId:'',to:'',subject:'',text:'',parentId:null}),[folder,setFolder]=useState('inbox'),[offset,setOffset]=useState(0),[messages,setMessages]=useState([]),[thread,setThread]=useState([]);
- const [selectedCampaignId,setSelectedCampaignId]=useState(null),[campaignForm,setCampaignForm]=useState({name:'',emails:''}),[campaignMsg,setCampaignMsg]=useState({personaId:'',connectionId:'',subject:'',text:''}),[editingRecipients,setEditingRecipients]=useState(false),[recipientEditText,setRecipientEditText]=useState('');
+ const [selectedCampaignId,setSelectedCampaignId]=useState(null),[campaignForm,setCampaignForm]=useState({name:'',emails:''}),[campaignMsg,setCampaignMsg]=useState({personaId:'',subject:'',text:''}),[editingRecipients,setEditingRecipients]=useState(false),[recipientEditText,setRecipientEditText]=useState('');
  async function refresh(){setData(await api('state'));}
  async function run(fn){setBusy(true);setError('');setNotice('');try{await fn();}catch(e){setError(e.message);}finally{setBusy(false);}}
  useEffect(()=>{refresh().catch(e=>setError(e.message)).finally(()=>setLoading(false));},[]);
@@ -48,12 +48,16 @@ export default function Dashboard(){
  function reply(m){const p=data.personas.find(p=>p.id===m.persona_id)||data.personas.find(p=>p.email===m.to_email)||data.personas[0];setCompose({id:crypto.randomUUID(),personaId:p?.id||'',connectionId:senders.find(c=>c.enabled)?.id||'',to:m.headers?.replyTo||m.from_email,subject:/^re:/i.test(m.subject)?m.subject:'Re: '+m.subject,text:'',parentId:m.id});setPage('Compose');}
  async function deletePersona(p){if(!confirm(`Delete persona "${p.name}" (${p.email})?`))return;await run(async()=>{await api('personas',{action:'delete',id:p.id});await refresh();if(persona.email===p.email)setPersona({name:'',email:''});if(compose.personaId===p.id)setCompose(c=>({...c,personaId:''}));setNotice(`Persona "${p.name}" deleted.`);});}
  async function deleteConnection(c){if(!confirm(`Delete connection "${c.label}" (${providers[c.provider]?.name||c.provider})? This will remove its settings and usage counters.`))return;await run(async()=>{await api('connections',{action:'delete',id:c.id});await refresh();setConnection(initialConnection('brevo'));setInspect(null);if(compose.connectionId===c.id)setCompose(prev=>({...prev,connectionId:''}));setNotice(`Connection "${c.label}" deleted.`);});}
+ const availableDailyCapacity=data.dailyCapacity!==undefined?Number(data.dailyCapacity):activeSenders.reduce((n,c)=>n+Math.max(0,getDailyLimit(c)-getDailySent(c)),0);
  const selectedCampaign=(data.campaigns||[]).find(c=>c.id===selectedCampaignId);
  const campaignSelectedPersona=data.personas.find(p=>p.id===campaignMsg.personaId);
- async function createCampaign(e){e.preventDefault();const parsed=parseEmailList(campaignForm.emails);if(!parsed.length){setError('Please enter at least one valid recipient email address.');return;}await run(async()=>{const res=await api('campaigns',{name:campaignForm.name,recipients:parsed});await refresh();setCampaignForm({name:'',emails:''});setNotice(`Campaign "${campaignForm.name}" created with ${parsed.length} recipient${parsed.length===1?'':'s'}.`);if(res.campaign?.id){setSelectedCampaignId(res.campaign.id);setRecipientEditText((res.campaign.recipients||[]).join('\n'));}});}
+ const campaignSelectedDomain=campaignSelectedPersona?campaignSelectedPersona.email.split('@')[1]:null;
+ const campaignEligiblePlatforms=campaignSelectedDomain?activeSenders.filter(c=>c.domains.includes(campaignSelectedDomain)):activeSenders;
+ const campaignEligibleCapacity=campaignEligiblePlatforms.reduce((n,c)=>n+Math.max(0,getDailyLimit(c)-getDailySent(c)),0);
+ async function createCampaign(e){e.preventDefault();const parsed=parseEmailList(campaignForm.emails);if(!parsed.length){setError('Please enter at least one valid recipient email address.');return;}if(parsed.length>availableDailyCapacity){setError(`Cannot create campaign: The recipient list contains ${parsed.length} emails, but the total available daily sending capacity across all active platforms is only ${availableDailyCapacity}. Please increase platform limits or reduce your recipient list.`);return;}await run(async()=>{const res=await api('campaigns',{name:campaignForm.name,recipients:parsed});await refresh();setCampaignForm({name:'',emails:''});setNotice(`Campaign "${campaignForm.name}" created with ${parsed.length} recipient${parsed.length===1?'':'s'}.`);if(res.campaign?.id){setSelectedCampaignId(res.campaign.id);setRecipientEditText((res.campaign.recipients||[]).join('\n'));}});}
  async function deleteCampaign(c){if(!confirm(`Delete campaign "${c.name}"? This will also remove its campaign message history.`))return;await run(async()=>{await api('campaigns',{action:'delete',id:c.id});if(selectedCampaignId===c.id)setSelectedCampaignId(null);await refresh();setNotice(`Campaign "${c.name}" deleted.`);});}
- async function saveRecipients(c){const parsed=parseEmailList(recipientEditText);if(!parsed.length){setError('Please enter at least one valid recipient email address.');return;}await run(async()=>{await api('campaigns',{action:'update',id:c.id,recipients:parsed});await refresh();setEditingRecipients(false);setNotice(`Updated "${c.name}" with ${parsed.length} recipient${parsed.length===1?'':'s'}.`);});}
- async function sendCampaignBroadcast(e){e.preventDefault();if(!selectedCampaign||!selectedCampaign.recipients?.length){setError('No recipients found in this campaign.');return;}await run(async()=>{const res=await api('campaigns/send',{campaignId:selectedCampaign.id,personaId:campaignMsg.personaId,connectionId:campaignMsg.connectionId,subject:campaignMsg.subject,text:campaignMsg.text});await refresh();if(res.status==='completed'){setNotice(`Broadcast successfully delivered to all ${res.sentCount} recipient${res.sentCount===1?'':'s'}!`);setCampaignMsg(prev=>({...prev,subject:'',text:''}));}else if(res.status==='quota-stopped'){setNotice(`Sending paused: Quota limit reached on provider. ${res.sentCount} sent, ${res.total-res.sentCount} remaining. ${res.error||''}`);}else if(res.status==='partial'){setNotice(`Broadcast finished with issues: ${res.sentCount} sent, ${res.failedCount} failed. ${res.error||''}`);}else{setNotice(`Broadcast status: ${res.status}. ${res.error||''}`);}});}
+ async function saveRecipients(c){const parsed=parseEmailList(recipientEditText);if(!parsed.length){setError('Please enter at least one valid recipient email address.');return;}if(parsed.length>availableDailyCapacity){setError(`Cannot update campaign: Recipient list has ${parsed.length} emails, but available daily sending capacity across all active platforms is only ${availableDailyCapacity}.`);return;}await run(async()=>{await api('campaigns',{action:'update',id:c.id,recipients:parsed});await refresh();setEditingRecipients(false);setNotice(`Updated "${c.name}" with ${parsed.length} recipient${parsed.length===1?'':'s'}.`);});}
+ async function sendCampaignBroadcast(e){e.preventDefault();if(!selectedCampaign||!selectedCampaign.recipients?.length){setError('No recipients found in this campaign.');return;}await run(async()=>{const res=await api('campaigns/send',{campaignId:selectedCampaign.id,personaId:campaignMsg.personaId,subject:campaignMsg.subject,text:campaignMsg.text});await refresh();const statsStr=res.platformStats&&Object.keys(res.platformStats).length?' ('+Object.entries(res.platformStats).map(([k,v])=>`${v} via ${k}`).join(', ')+')':'';if(res.status==='completed'){setNotice(`Broadcast successfully delivered to all ${res.sentCount} recipient${res.sentCount===1?'':'s'}!${statsStr}`);setCampaignMsg(prev=>({...prev,subject:'',text:''}));}else if(res.status==='quota-stopped'){setNotice(`Sending paused: Daily capacity reached across available platforms. ${res.sentCount} sent, ${res.total-res.sentCount} remaining.${statsStr} ${res.error||''}`);}else if(res.status==='partial'){setNotice(`Broadcast finished with issues: ${res.sentCount} sent, ${res.failedCount} failed.${statsStr} ${res.error||''}`);}else{setNotice(`Broadcast status: ${res.status}.${statsStr} ${res.error||''}`);}});}
  function navigate(p){setPage(p);setError('');setNotice('');if(p==='Compose'&&!compose.id)setCompose(c=>({...c,id:crypto.randomUUID()}));if(p==='Campaigns')setSelectedCampaignId(null);}
  return <div className="shell"><aside><a className="brand" href="/"><span className="brandmark">E</span>EmailSender<span className="branddot">.</span></a><p className="navlabel">WORKSPACE</p><nav>{[['Overview','◫'],['Campaigns','📢'],['Connected','⇄'],['Personas','◎'],['Compose','↗'],['Mailbox','▤'],['Deployment','⌘']].map(([p,icon])=><button key={p} className={(page===p||(p==='Connected'&&page==='Connections'))?'active':''} onClick={()=>{if(p==='Connected')setConnectedTab('capacity');if(p==='Campaigns')setSelectedCampaignId(null);navigate(p);}}><span>{icon}</span>{p}{p==='Connected'&&<small>{senders.length}</small>}{p==='Campaigns'&&<small>{(data.campaigns||[]).length}</small>}</button>)}</nav><div className="sidebarfoot"><span className="dot"/>Private workspace<p>Vercel · Neon · Cloudflare</p><button className="link" onClick={()=>run(async()=>{await api('logout',{});location.href='/login';})}>Sign out</button></div></aside><main><header><div><p className="eyebrow">EMAIL WORKSPACE / {(page==='Connections'?'CONNECTED':page).toUpperCase()}</p><h1>{({Overview:'Your mail, connected.',Campaigns:'Targeted email broadcasts.',Connected:'Platform capacity and usage.',Connections:'Connect your platforms.',Personas:'Choose who you send as.',Compose:'A new conversation.',Mailbox:'Your conversations.',Deployment:'Ready to go live.'})[page]}</h1></div><button onClick={()=>navigate('Compose')}>+ Compose email</button></header>{error&&<div role="alert" className="alert error">{error}</div>}{notice&&<div role="status" className="alert success">{notice}</div>}{loading&&<p className="muted">Loading your workspace…</p>}
  {page==='Overview'&&<><section className="stats"><div className="card"><p>Daily sent / Capacity</p><strong>{totalDailySent.toLocaleString()}<small> / {totalDailyCapacity>0?totalDailyCapacity.toLocaleString():'No limit'}</small></strong><progress max={totalDailyCapacity||1} value={totalDailyCapacity?totalDailySent:0}/><div style={{display:'flex',justifyContent:'space-between',fontSize:'11px',color:'var(--muted)',marginTop:'6px'}}><span>{totalDailyCapacity>0?`${Math.max(0,totalDailyCapacity-totalDailySent).toLocaleString()} remaining today`:'No daily cap'}</span><span>{dailyPercent}% used</span></div>{senders.length>0&&activeSenders.length!==senders.length&&<small style={{display:'block',marginTop:'5px',color:'#b07d12'}}>{activeDailyCapacity.toLocaleString()} active capacity ({activeSenders.length}/{senders.length} enabled)</small>}</div><div className="card"><p>Monthly sent / Capacity</p><strong>{totalMonthlySent.toLocaleString()}<small> / {totalMonthlyCapacity>0?totalMonthlyCapacity.toLocaleString():'No limit'}</small></strong><progress max={totalMonthlyCapacity||1} value={totalMonthlyCapacity?totalMonthlySent:0}/><div style={{display:'flex',justifyContent:'space-between',fontSize:'11px',color:'var(--muted)',marginTop:'6px'}}><span>{totalMonthlyCapacity>0?`${Math.max(0,totalMonthlyCapacity-totalMonthlySent).toLocaleString()} remaining`:'No monthly cap'}</span><span>{monthlyPercent}% used</span></div>{senders.length>0&&activeSenders.length!==senders.length&&<small style={{display:'block',marginTop:'5px',color:'#b07d12'}}>{activeMonthlyCapacity.toLocaleString()} active capacity ({activeSenders.length}/{senders.length} enabled)</small>}</div><div className="card"><p>Connected platforms</p><strong>{activeSenders.length}<small> / {senders.length} active</small></strong><p style={{fontSize:'12px',color:'var(--muted)',margin:'10px 0 10px'}}>{data.personas.length} persona{data.personas.length===1?'':'s'} configured</p><button className="link" onClick={()=>{setConnectedTab('capacity');navigate('Connected');}}>View platform details →</button></div></section><div className="sectiontitle"><div><h2>Sending capacity overview</h2><p className="muted">Combined sending quota calculated across your connected platforms.</p></div><div style={{display:'flex',gap:'10px'}}><button className="secondary" onClick={()=>run(refresh)}>Refresh</button><button onClick={()=>{setConnectedTab('capacity');navigate('Connected');}}>View Connected Page →</button></div></div>{!senders.length?<div className="empty card"><div className="emptyicon">⇄</div><h2>Your first connection starts here.</h2><p>Add a sending provider, verify your domain, then create your persona.</p><button onClick={()=>{setConnectedTab('settings');navigate('Connected');}}>Connect a platform →</button></div>:<div className="card" style={{padding:'24px'}}><div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',flexWrap:'wrap',gap:'16px',marginBottom:'20px'}}><div><h3 style={{fontSize:'17px',marginBottom:'4px'}}>Platforms Capacity Breakdown</h3><p className="muted" style={{margin:0}}>{senders.length} connected platform{senders.length===1?'':'s'} ({activeSenders.length} active) providing {totalDailyCapacity.toLocaleString()} daily and {totalMonthlyCapacity.toLocaleString()} monthly sending capacity.</p></div><button className="link" onClick={()=>{setConnectedTab('capacity');navigate('Connected');}}>Full platform meters & reset schedules →</button></div><div style={{display:'grid',gap:'10px'}}>{senders.map(c=>{const dUsed=getDailySent(c),dLimit=getDailyLimit(c),mUsed=getMonthlySent(c),mLimit=getMonthlyLimit(c);return <div key={c.id} style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'12px 16px',background:'var(--bg)',borderRadius:'8px',gap:'16px',flexWrap:'wrap'}}><div style={{display:'flex',alignItems:'center',gap:'10px',minWidth:'170px'}}><div><b style={{fontSize:'14px',display:'block'}}>{c.label}</b><span className="muted" style={{fontSize:'11px'}}>{c.domains.join(', ')}</span></div><span className={'badge '+(c.enabled?'green':'')} style={{marginLeft:'auto'}}>{c.enabled?'Enabled':'Paused'}</span></div><div style={{display:'flex',gap:'20px',fontSize:'12px',alignItems:'center'}}><div><span className="muted" style={{fontSize:'10px',display:'block',textTransform:'uppercase',letterSpacing:'0.5px'}}>Daily allowance</span><b>{dUsed} / {dLimit||'No cap'}</b></div><div><span className="muted" style={{fontSize:'10px',display:'block',textTransform:'uppercase',letterSpacing:'0.5px'}}>Monthly allowance</span><b>{mUsed} / {mLimit||'No cap'}</b></div></div><button className="link" style={{fontSize:'12px'}} onClick={()=>edit(c)}>Manage settings →</button></div>;})}</div><p className="footnote" style={{marginTop:'18px'}}>Quotas are shared by every persona. Provider approval, external usage, hourly limits and actual billing periods may reduce available capacity. For detailed per-platform usage meters and reset timestamps, visit the <button className="link" style={{display:'inline',padding:0,fontSize:'inherit'}} onClick={()=>{setConnectedTab('capacity');navigate('Connected');}}>Connected page</button>.</p></div>}</>}
@@ -74,21 +78,41 @@ export default function Dashboard(){
      <form className="card form composer" onSubmit={sendCampaignBroadcast}>
       <h3 style={{fontSize:'18px',marginBottom:'4px'}}>Send a message to this campaign</h3>
       <p className="muted" style={{marginBottom:'16px'}}>A personalized individual copy will be sent to every recipient in this campaign.</p>
-      <div className="row">
-       <label>Sender persona
-        <select required value={campaignMsg.personaId} onChange={e=>setCampaignMsg({...campaignMsg,personaId:e.target.value})}>
-         <option value="">Choose a persona</option>
-         {data.personas.map(p=><option value={p.id} key={p.id}>{p.name} — {p.email}</option>)}
-        </select>
-       </label>
-       <label>Sending platform
-        <select required value={campaignMsg.connectionId} onChange={e=>setCampaignMsg({...campaignMsg,connectionId:e.target.value})}>
-         <option value="">Choose a platform</option>
-         {senders.map(c=><option key={c.id} value={c.id} disabled={!c.enabled||(!!campaignSelectedPersona&&!c.domains.includes(campaignSelectedPersona.email.split('@')[1]))}>
-          {c.label}{!c.enabled?' — paused':campaignSelectedPersona&&!c.domains.includes(campaignSelectedPersona.email.split('@')[1])?' — verify domain':''}
-         </option>)}
-        </select>
-       </label>
+      <label>Sender persona
+       <select required value={campaignMsg.personaId} onChange={e=>setCampaignMsg({...campaignMsg,personaId:e.target.value})}>
+        <option value="">Choose a persona to send as</option>
+        {data.personas.map(p=><option value={p.id} key={p.id}>{p.name} — {p.email}</option>)}
+       </select>
+      </label>
+      <div style={{background:'var(--bg)',borderRadius:'8px',padding:'12px 14px',border:'1px solid var(--line)',marginBottom:'14px'}}>
+       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'4px'}}>
+        <strong style={{fontSize:'12px',letterSpacing:'0.3px'}}>PLATFORM AUTO-ALLOCATION</strong>
+        <span className="badge green" style={{fontSize:'11px'}}>Daily Capacity Waterfall</span>
+       </div>
+       <p className="muted" style={{fontSize:'12px',margin:0,lineHeight:'1.4'}}>
+        All connected platforms participate automatically. Emails fill Platform 1 to its daily capacity, then overflow to the next platform.
+       </p>
+       {campaignSelectedPersona && (
+        <div style={{marginTop:'8px',paddingTop:'8px',borderTop:'1px dashed var(--line)',fontSize:'12px'}}>
+         {campaignEligiblePlatforms.length > 0 ? (
+          <div style={{display:'flex',flexWrap:'wrap',gap:'6px',alignItems:'center'}}>
+           <span className="muted" style={{fontSize:'11px'}}>Pool for {campaignSelectedDomain} ({campaignEligibleCapacity} capacity today):</span>
+           {campaignEligiblePlatforms.map(c => {
+            const rem = Math.max(0, getDailyLimit(c) - getDailySent(c));
+            return (
+             <span key={c.id} className="badge" style={{background:'#fff',border:'1px solid var(--line)',fontSize:'11px',padding:'3px 7px'}}>
+              <b>{c.label}</b>: {rem} left
+             </span>
+            );
+           })}
+          </div>
+         ) : (
+          <p className="error" style={{margin:0,fontSize:'12px'}}>
+           ⚠️ No active platforms have verified the domain &quot;{campaignSelectedDomain}&quot;. Please enable or verify this domain in Connected.
+          </p>
+         )}
+        </div>
+       )}
       </div>
       <label>Subject
        <input required maxLength="255" value={campaignMsg.subject} onChange={e=>setCampaignMsg({...campaignMsg,subject:e.target.value})} placeholder="Subject line for campaign broadcast"/>
@@ -137,19 +161,31 @@ export default function Dashboard(){
         <p className="muted" style={{fontSize:'13px',margin:0}}>No messages sent yet. Use the composer on the left to send your first message to this campaign.</p>
        ):(
         <div style={{display:'grid',gap:'10px',maxHeight:'320px',overflowY:'auto'}}>
-         {selectedCampaign.messages.map(m=>(
-          <div key={m.id} style={{padding:'12px',background:'var(--bg)',borderRadius:'8px',border:'1px solid var(--line)'}}>
-           <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:'8px'}}>
-            <b style={{fontSize:'13px'}}>{m.subject}</b>
-            <span className={'badge '+(m.status==='completed'?'green':m.status==='quota-stopped'?'':m.status==='failed'?'danger':'')}>{m.status}</span>
+         {selectedCampaign.messages.map(m=>{
+          const stats = m.platform_stats && typeof m.platform_stats === 'object' && Object.keys(m.platform_stats).length > 0 ? m.platform_stats : null;
+          return (
+           <div key={m.id} style={{padding:'12px',background:'var(--bg)',borderRadius:'8px',border:'1px solid var(--line)'}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:'8px'}}>
+             <b style={{fontSize:'13px'}}>{m.subject}</b>
+             <span className={'badge '+(m.status==='completed'?'green':m.status==='quota-stopped'?'':m.status==='failed'?'danger':'')}>{m.status}</span>
+            </div>
+            <div style={{display:'flex',justifyContent:'space-between',fontSize:'11px',color:'var(--muted)',marginTop:'6px',flexWrap:'wrap',gap:'6px'}}>
+             <span>{m.sent_count} sent · {m.failed_count} failed ({m.total_recipients} total)</span>
+             <time>{fmt(m.created_at)}</time>
+            </div>
+            {stats && (
+             <div style={{marginTop:'6px',display:'flex',flexWrap:'wrap',gap:'4px'}}>
+              {Object.entries(stats).map(([plat, count]) => (
+               <span key={plat} className="badge" style={{background:'#fff',border:'1px solid var(--line)',fontSize:'10px',padding:'2px 6px'}}>
+                {count} via {plat}
+               </span>
+              ))}
+             </div>
+            )}
+            {m.text_body&&<p style={{fontSize:'12px',color:'var(--muted)',margin:'8px 0 0',maxHeight:'38px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{m.text_body}</p>}
            </div>
-           <div style={{display:'flex',justifyContent:'space-between',fontSize:'11px',color:'var(--muted)',marginTop:'6px'}}>
-            <span>{m.sent_count} sent · {m.failed_count} failed ({m.total_recipients} total)</span>
-            <time>{fmt(m.created_at)}</time>
-           </div>
-           {m.text_body&&<p style={{fontSize:'12px',color:'var(--muted)',margin:'8px 0 0',maxHeight:'38px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{m.text_body}</p>}
-          </div>
-         ))}
+          );
+         })}
         </div>
        )}
       </div>
@@ -191,6 +227,13 @@ export default function Dashboard(){
     </section>
     <form className="card form" onSubmit={createCampaign}>
      <h2>Create a campaign</h2>
+     <div style={{background:'var(--bg)',borderRadius:'8px',padding:'12px',border:'1px solid var(--line)',marginBottom:'14px'}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+       <span style={{fontSize:'12px',fontWeight:'600'}}>Available Daily Sending Capacity</span>
+       <span className="badge green">{availableDailyCapacity.toLocaleString()} emails today</span>
+      </div>
+      <p className="muted" style={{fontSize:'11px',margin:'4px 0 0'}}>Across all {activeSenders.length} active platform{activeSenders.length===1?'':'s'}. Campaigns cannot exceed available daily quota.</p>
+     </div>
      <label>Campaign name
       <input required value={campaignForm.name} onChange={e=>setCampaignForm({...campaignForm,name:e.target.value})} placeholder="e.g. VIP Newsletter, Beta Users"/>
      </label>
@@ -198,10 +241,18 @@ export default function Dashboard(){
       <textarea required rows="10" value={campaignForm.emails} onChange={e=>setCampaignForm({...campaignForm,emails:e.target.value})} placeholder="alice@example.com&#10;bob@example.com&#10;carol@example.com"/>
      </label>
      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'12px'}}>
-      <small className="muted">{parseEmailList(campaignForm.emails).length} valid email(s) detected</small>
+      <small className={parseEmailList(campaignForm.emails).length > availableDailyCapacity ? 'error' : 'muted'}>
+       {parseEmailList(campaignForm.emails).length} valid email(s) detected
+       {parseEmailList(campaignForm.emails).length > availableDailyCapacity && ` (Exceeds capacity by ${parseEmailList(campaignForm.emails).length - availableDailyCapacity})`}
+      </small>
      </div>
-     <p className="muted">After creating your campaign, you can compose and send messages to all recipients.</p>
-     <button disabled={busy||!campaignForm.name.trim()||!parseEmailList(campaignForm.emails).length}>Create campaign</button>
+     {parseEmailList(campaignForm.emails).length > availableDailyCapacity && (
+      <div className="alert error" style={{marginBottom:'12px',fontSize:'13px'}}>
+       Capacity exceeded: You entered {parseEmailList(campaignForm.emails).length} emails, but only {availableDailyCapacity} daily capacity remains today. Reduce emails or increase platform limits.
+      </div>
+     )}
+     <p className="muted">Emails will be automatically allocated across your platforms up to each platform&apos;s daily capacity.</p>
+     <button disabled={busy||!campaignForm.name.trim()||!parseEmailList(campaignForm.emails).length||parseEmailList(campaignForm.emails).length > availableDailyCapacity}>Create campaign</button>
     </form>
    </div>
   )}

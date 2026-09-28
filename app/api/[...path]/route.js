@@ -38,10 +38,32 @@ async function ensureCampaignTables(sql) {
             sent_count int NOT NULL DEFAULT 0,
             failed_count int NOT NULL DEFAULT 0,
             status text NOT NULL DEFAULT 'pending',
+            platform_stats jsonb NOT NULL DEFAULT '{}',
             created_at timestamptz NOT NULL DEFAULT now()
         );
     `;
+    await sql`ALTER TABLE campaign_messages ADD COLUMN IF NOT EXISTS platform_stats jsonb NOT NULL DEFAULT '{}';`;
     campaignTablesChecked = true;
+}
+async function getDailyAvailableCapacity(sql) {
+    const connections = await sql`SELECT id, provider, daily_limit FROM connections WHERE provider<>'cloudflare' AND enabled=true`;
+    if (!connections.length) return 0;
+    const usageRows = await sql`
+        SELECT c.id, w.value || jsonb_build_object('used', coalesce(u.used, 0)) AS window 
+        FROM connections c 
+        CROSS JOIN LATERAL jsonb_array_elements(quota_windows(c)) w 
+        LEFT JOIN usage_counters u ON u.key = c.id::text || ':' || (w.value->>'name') || ':' || (w.value->>'start') 
+        WHERE c.provider<>'cloudflare' AND c.enabled=true
+    `;
+    let total = 0;
+    for (const c of connections) {
+        const cWindows = usageRows.filter(r => r.id === c.id).map(r => r.window);
+        const dayW = cWindows.find(w => w.name === 'day');
+        const limitVal = (c.daily_limit !== null && c.daily_limit !== undefined) ? Number(c.daily_limit) : (providers[c.provider]?.daily || 100000);
+        const used = dayW?.used || 0;
+        total += Math.max(0, limitVal - used);
+    }
+    return total;
 }
 async function state() {
     const sql = db();
@@ -55,10 +77,12 @@ async function state() {
         recipients: Array.isArray(c.recipients) ? c.recipients : JSON.parse(c.recipients || '[]'),
         messages: campaignMessages.filter(m => m.campaign_id === c.id)
     }));
+    const dailyCapacity = await getDailyAvailableCapacity(sql);
     return {
         connections: connections.map(c => ({ ...c, usage: usage.filter(u => u.id === c.id).map(u => u.window) })),
         personas: await sql`SELECT * FROM personas ORDER BY name`,
         campaigns: campaignsWithMessages,
+        dailyCapacity,
         providers
     };
 }
@@ -208,11 +232,23 @@ async function handler(req, { params }) {
                 if (!existing) fail('Campaign not found', 404);
                 const name = p.name !== undefined ? line(p.name, 'name', 100) : existing.name;
                 const recipients = p.recipients !== undefined ? parseEmailList(p.recipients) : (Array.isArray(existing.recipients) ? existing.recipients : JSON.parse(existing.recipients || '[]'));
+                if (p.recipients !== undefined) {
+                    if (!recipients.length) fail('Please provide at least one valid recipient email address', 400);
+                    const available = await getDailyAvailableCapacity(sql);
+                    if (recipients.length > available) {
+                        fail(`Cannot update campaign: List contains ${recipients.length} emails, but available daily sending capacity across all active platforms is only ${available}. Please increase platform daily limits or reduce list size.`, 400);
+                    }
+                }
                 const [updated] = await sql`UPDATE campaigns SET name=${name}, recipients=${JSON.stringify(recipients)}::jsonb WHERE id=${id} RETURNING *`;
                 return json({ ok: true, campaign: updated });
             }
             const name = line(p.name, 'name', 100);
             const recipients = parseEmailList(p.recipients || p.emails || []);
+            if (!recipients.length) fail('Please provide at least one valid recipient email address', 400);
+            const available = await getDailyAvailableCapacity(sql);
+            if (recipients.length > available) {
+                fail(`Cannot create campaign: The list contains ${recipients.length} emails, but the total available daily sending capacity across all active platforms is only ${available}. Please increase your platform limits or reduce the list size.`, 400);
+            }
             const [inserted] = await sql`INSERT INTO campaigns(name, recipients) VALUES(${name}, ${JSON.stringify(recipients)}::jsonb) RETURNING *`;
             return json({ ok: true, campaign: inserted });
         }
@@ -228,24 +264,65 @@ async function handler(req, { params }) {
             const subject = line(p.subject, 'subject');
             if (typeof p.text !== 'string' || !p.text.trim() || p.text.length > 100000) fail('Message body is required (maximum 100,000 characters)');
 
-            const [c] = await sql`SELECT * FROM connections WHERE id=${uuid(p.connectionId)}`;
             const [persona] = await sql`SELECT * FROM personas WHERE id=${uuid(p.personaId)}`;
-            if (!c || !persona) fail('Choose a persona and connection');
-            if (!c.enabled) fail('Selected connection is paused');
+            if (!persona) fail('Choose a sender persona', 400);
             const senderDomain = persona.email.split('@')[1];
-            if (!c.domains.includes(senderDomain)) fail('Verify the persona domain on this provider first');
 
+            // 1. Discover all active sending platforms that verified this persona's domain
+            const activeConnections = await sql`SELECT * FROM connections WHERE provider<>'cloudflare' AND enabled=true ORDER BY connected_at ASC`;
+            const eligibleConnections = activeConnections.filter(c => {
+                const domains = Array.isArray(c.domains) ? c.domains : (typeof c.domains === 'string' ? JSON.parse(c.domains || '[]') : []);
+                return domains.includes(senderDomain);
+            });
+
+            if (!eligibleConnections.length) {
+                fail(`No enabled sending platforms have verified domain "${senderDomain}". Please add or verify this domain in Connections.`, 400);
+            }
+
+            // 2. Fetch current quota usage for eligible connections
+            const connIds = eligibleConnections.map(c => c.id);
+            const usageRows = await sql`
+                SELECT c.id, w.value || jsonb_build_object('used', coalesce(u.used, 0)) AS window 
+                FROM connections c 
+                CROSS JOIN LATERAL jsonb_array_elements(quota_windows(c)) w 
+                LEFT JOIN usage_counters u ON u.key = c.id::text || ':' || (w.value->>'name') || ':' || (w.value->>'start') 
+                WHERE c.id = ANY(${connIds})
+            `;
+
+            // 3. Build platform pool with remaining capacity
+            const platformPool = [];
+            for (const c of eligibleConnections) {
+                const cWindows = usageRows.filter(r => r.id === c.id).map(r => r.window);
+                const dayW = cWindows.find(w => w.name === 'day');
+                const limitVal = (c.daily_limit !== null && c.daily_limit !== undefined) ? Number(c.daily_limit) : (providers[c.provider]?.daily || 100000);
+                const used = dayW?.used || 0;
+                const remaining = Math.max(0, limitVal - used);
+                if (remaining > 0) {
+                    platformPool.push({
+                        connection: c,
+                        credentials: decrypt(c.credentials),
+                        remaining,
+                        sentThisBatch: 0
+                    });
+                }
+            }
+
+            if (!platformPool.length) {
+                fail(`All platforms capable of sending for "${senderDomain}" have exhausted their daily sending quota for today. Please wait for quota reset or increase daily limits.`, 400);
+            }
+
+            // 4. Create campaign_messages record
             const [campaignMsg] = await sql`
-                INSERT INTO campaign_messages(campaign_id, subject, text_body, persona_id, connection_id, total_recipients, status)
-                VALUES(${campaign.id}, ${subject}, ${p.text}, ${persona.id}, ${c.id}, ${recipients.length}, 'sending')
+                INSERT INTO campaign_messages(campaign_id, subject, text_body, persona_id, total_recipients, status)
+                VALUES(${campaign.id}, ${subject}, ${p.text}, ${persona.id}, ${recipients.length}, 'sending')
                 RETURNING *
             `;
 
-            const credentials = decrypt(c.credentials);
             const [inbound] = await sql`SELECT id FROM connections WHERE provider='cloudflare' AND enabled AND domains ? ${senderDomain}`;
 
             let sentCount = 0;
             let failedCount = 0;
+            let currentPoolIdx = 0;
             let quotaHit = false;
             let lastError = null;
 
@@ -258,31 +335,60 @@ async function handler(req, { params }) {
                     }
                 } catch {}
 
+                // Move to next platform if current platform has no remaining capacity
+                while (currentPoolIdx < platformPool.length && platformPool[currentPoolIdx].remaining <= 0) {
+                    currentPoolIdx++;
+                }
+
+                if (currentPoolIdx >= platformPool.length) {
+                    quotaHit = true;
+                    lastError = 'Daily quota limit reached across all available platforms';
+                    break;
+                }
+
                 const msgId = randomUUID();
                 const token = randomBytes(16).toString('hex');
                 const replyTo = inbound ? `reply+${token}@${senderDomain}` : persona.email;
                 const payload = { id: msgId, from: persona.email, fromName: persona.name, to: recipient, subject, text: p.text, html: '', replyTo, headers: {} };
 
-                let reservation;
-                try {
-                    const [res] = await sql`SELECT reserve_email(${c.id},${persona.id},${msgId},null,${recipient},${subject},${p.text},'',${JSON.stringify({})}::jsonb,${token},null) AS result`;
-                    reservation = res.result;
-                } catch (e) {
-                    if (e.message && e.message.includes('Quota reached')) {
-                        quotaHit = true;
+                let reservation = null;
+                let activePlatform = null;
+                let c = null;
+                let credentials = null;
+
+                // Try reservation; if current platform quota is exhausted, rollover to next platform!
+                while (currentPoolIdx < platformPool.length) {
+                    activePlatform = platformPool[currentPoolIdx];
+                    c = activePlatform.connection;
+                    credentials = activePlatform.credentials;
+
+                    try {
+                        const [res] = await sql`SELECT reserve_email(${c.id},${persona.id},${msgId},null,${recipient},${subject},${p.text},'',${JSON.stringify({})}::jsonb,${token},null) AS result`;
+                        reservation = res.result;
+                        break;
+                    } catch (e) {
+                        if (e.message && e.message.includes('Quota reached')) {
+                            activePlatform.remaining = 0;
+                            currentPoolIdx++;
+                            continue;
+                        }
                         lastError = e.message;
                         break;
                     }
+                }
+
+                if (!reservation) {
+                    if (currentPoolIdx >= platformPool.length) {
+                        quotaHit = true;
+                        break;
+                    }
                     failedCount++;
-                    lastError = e.message;
                     continue;
                 }
 
-                if (reservation?.duplicate) {
-                    continue;
-                }
+                if (reservation.duplicate) continue;
 
-                const reservationKeys = reservation?.reservation || [];
+                const reservationKeys = reservation.reservation || [];
                 try {
                     await messageStore('insertOutbound', {
                         message: {
@@ -316,13 +422,27 @@ async function handler(req, { params }) {
                     await sql`SELECT finish_email(${msgId}, 'accepted', ${outcome.providerId}, ${outcome.messageId}, null)`;
                     await messageStore('updateMessage', { id: msgId, status: 'accepted', provider_id: outcome.providerId, message_id: outcome.messageId });
                     sentCount++;
+                    activePlatform.remaining--;
+                    activePlatform.sentThisBatch++;
                 } catch (e) {
                     const status = e.uncertain === false ? 'failed' : 'unknown';
                     await sql`SELECT finish_email(${msgId}, ${status}, null, null, ${e.message})`;
                     await messageStore('updateMessage', { id: msgId, status, error: e.message });
                     if (status === 'failed') failedCount++;
-                    else sentCount++;
+                    else {
+                        sentCount++;
+                        activePlatform.remaining--;
+                        activePlatform.sentThisBatch++;
+                    }
                     lastError = e.message;
+                }
+            }
+
+            // Build platform breakdown stats
+            const platformStats = {};
+            for (const p of platformPool) {
+                if (p.sentThisBatch > 0) {
+                    platformStats[p.connection.label || p.connection.provider] = p.sentThisBatch;
                 }
             }
 
@@ -333,7 +453,7 @@ async function handler(req, { params }) {
 
             await sql`
                 UPDATE campaign_messages
-                SET sent_count=${sentCount}, failed_count=${failedCount}, status=${finalStatus}
+                SET sent_count=${sentCount}, failed_count=${failedCount}, status=${finalStatus}, platform_stats=${JSON.stringify(platformStats)}::jsonb
                 WHERE id=${campaignMsg.id}
             `;
 
@@ -344,6 +464,7 @@ async function handler(req, { params }) {
                 failedCount,
                 total: recipients.length,
                 status: finalStatus,
+                platformStats,
                 error: lastError
             });
         }

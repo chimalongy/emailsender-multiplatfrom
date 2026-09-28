@@ -97,5 +97,6 @@ CREATE TABLE IF NOT EXISTS campaign_messages (
  sent_count int NOT NULL DEFAULT 0,
  failed_count int NOT NULL DEFAULT 0,
  status text NOT NULL DEFAULT 'pending',
+ platform_stats jsonb NOT NULL DEFAULT '{}',
  created_at timestamptz NOT NULL DEFAULT now()
 );
