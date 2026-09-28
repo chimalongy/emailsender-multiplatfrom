@@ -9,7 +9,15 @@ export default function Dashboard(){
  const [page,setPage]=useState('Overview'),[connectedTab,setConnectedTab]=useState('capacity'),[data,setData]=useState({connections:[],personas:[],campaigns:[]}),[error,setError]=useState(''),[notice,setNotice]=useState(''),[busy,setBusy]=useState(false),[loading,setLoading]=useState(true);
  const [connection,setConnection]=useState(initialConnection('brevo')),[inspect,setInspect]=useState(null),[persona,setPersona]=useState({name:'',email:''});
  const [compose,setCompose]=useState({id:'',personaId:'',connectionId:'',to:'',subject:'',text:'',parentId:null}),[folder,setFolder]=useState('inbox'),[offset,setOffset]=useState(0),[messages,setMessages]=useState([]),[thread,setThread]=useState([]);
- const [selectedCampaignId,setSelectedCampaignId]=useState(null),[campaignForm,setCampaignForm]=useState({name:'',emails:''}),[campaignMsg,setCampaignMsg]=useState({personaId:'',subject:'',text:''}),[editingRecipients,setEditingRecipients]=useState(false),[recipientEditText,setRecipientEditText]=useState('');
+ const [selectedCampaignId,setSelectedCampaignId]=useState(null),[campaignForm,setCampaignForm]=useState({name:'',emails:''}),[campaignMsg,setCampaignMsg]=useState({personaId:'',subject:'',text:'',sendMode:'now',scheduledAt:''}),[editingRecipients,setEditingRecipients]=useState(false),[recipientEditText,setRecipientEditText]=useState('');
+ const [calMonth,setCalMonth]=useState(new Date().getMonth()+1);
+ const [calYear,setCalYear]=useState(new Date().getFullYear());
+ const [calData,setCalData]=useState(null);
+ const [calLoading,setCalLoading]=useState(false);
+ const [selectedCalDay,setSelectedCalDay]=useState(null);
+ async function loadCalendar(year,month){setCalLoading(true);try{const d=await api(`campaigns/calendar?year=${year}&month=${month}`);setCalData(d);}catch(e){setError(e.message);}finally{setCalLoading(false);}}
+ useEffect(()=>{if(page==='Schedules')loadCalendar(calYear,calMonth);},[page,calYear,calMonth]);
+ async function cancelScheduledBroadcast(id){if(!confirm('Are you sure you want to cancel this scheduled broadcast?'))return;await run(async()=>{await api('campaigns/cancel-schedule',{id});await refresh();if(page==='Schedules')await loadCalendar(calYear,calMonth);setNotice('Scheduled broadcast was cancelled.');});}
  async function refresh(){setData(await api('state'));}
  async function run(fn){setBusy(true);setError('');setNotice('');try{await fn();}catch(e){setError(e.message);}finally{setBusy(false);}}
  useEffect(()=>{refresh().catch(e=>setError(e.message)).finally(()=>setLoading(false));},[]);
@@ -57,9 +65,9 @@ export default function Dashboard(){
  async function createCampaign(e){e.preventDefault();const parsed=parseEmailList(campaignForm.emails);if(!parsed.length){setError('Please enter at least one valid recipient email address.');return;}if(parsed.length>availableDailyCapacity){setError(`Cannot create campaign: The recipient list contains ${parsed.length} emails, but the total available daily sending capacity across all active platforms is only ${availableDailyCapacity}. Please increase platform limits or reduce your recipient list.`);return;}await run(async()=>{const res=await api('campaigns',{name:campaignForm.name,recipients:parsed});await refresh();setCampaignForm({name:'',emails:''});setNotice(`Campaign "${campaignForm.name}" created with ${parsed.length} recipient${parsed.length===1?'':'s'}.`);if(res.campaign?.id){setSelectedCampaignId(res.campaign.id);setRecipientEditText((res.campaign.recipients||[]).join('\n'));}});}
  async function deleteCampaign(c){if(!confirm(`Delete campaign "${c.name}"? This will also remove its campaign message history.`))return;await run(async()=>{await api('campaigns',{action:'delete',id:c.id});if(selectedCampaignId===c.id)setSelectedCampaignId(null);await refresh();setNotice(`Campaign "${c.name}" deleted.`);});}
  async function saveRecipients(c){const parsed=parseEmailList(recipientEditText);if(!parsed.length){setError('Please enter at least one valid recipient email address.');return;}if(parsed.length>availableDailyCapacity){setError(`Cannot update campaign: Recipient list has ${parsed.length} emails, but available daily sending capacity across all active platforms is only ${availableDailyCapacity}.`);return;}await run(async()=>{await api('campaigns',{action:'update',id:c.id,recipients:parsed});await refresh();setEditingRecipients(false);setNotice(`Updated "${c.name}" with ${parsed.length} recipient${parsed.length===1?'':'s'}.`);});}
- async function sendCampaignBroadcast(e){e.preventDefault();if(!selectedCampaign||!selectedCampaign.recipients?.length){setError('No recipients found in this campaign.');return;}await run(async()=>{const res=await api('campaigns/send',{campaignId:selectedCampaign.id,personaId:campaignMsg.personaId,subject:campaignMsg.subject,text:campaignMsg.text});await refresh();const statsStr=res.platformStats&&Object.keys(res.platformStats).length?' ('+Object.entries(res.platformStats).map(([k,v])=>`${v} via ${k}`).join(', ')+')':'';if(res.status==='completed'){setNotice(`Broadcast successfully delivered to all ${res.sentCount} recipient${res.sentCount===1?'':'s'}!${statsStr}`);setCampaignMsg(prev=>({...prev,subject:'',text:''}));}else if(res.status==='quota-stopped'){setNotice(`Sending paused: Daily capacity reached across available platforms. ${res.sentCount} sent, ${res.total-res.sentCount} remaining.${statsStr} ${res.error||''}`);}else if(res.status==='partial'){setNotice(`Broadcast finished with issues: ${res.sentCount} sent, ${res.failedCount} failed.${statsStr} ${res.error||''}`);}else{setNotice(`Broadcast status: ${res.status}.${statsStr} ${res.error||''}`);}});}
+ async function sendCampaignBroadcast(e){e.preventDefault();if(!selectedCampaign||!selectedCampaign.recipients?.length){setError('No recipients found in this campaign.');return;}if(campaignMsg.sendMode==='schedule'&&!campaignMsg.scheduledAt){setError('Please select a scheduled date and time for this broadcast.');return;}await run(async()=>{const res=await api('campaigns/send',{campaignId:selectedCampaign.id,personaId:campaignMsg.personaId,subject:campaignMsg.subject,text:campaignMsg.text,scheduledAt:campaignMsg.sendMode==='schedule'?campaignMsg.scheduledAt:undefined});await refresh();if(res.scheduled){setNotice(`Broadcast successfully scheduled for ${new Date(res.scheduledAt).toLocaleString()}! QStash & DailyScheduler will dispatch via waterfall at the designated time.`);setCampaignMsg(prev=>({...prev,subject:'',text:'',sendMode:'now',scheduledAt:''}));}else{const statsStr=res.platformStats&&Object.keys(res.platformStats).length?' ('+Object.entries(res.platformStats).map(([k,v])=>`${v} via ${k}`).join(', ')+')':'';if(res.status==='completed'){setNotice(`Broadcast successfully delivered to all ${res.sentCount} recipient${res.sentCount===1?'':'s'}!${statsStr}`);setCampaignMsg(prev=>({...prev,subject:'',text:''}));}else if(res.status==='quota-stopped'){setNotice(`Sending paused: Daily capacity reached across available platforms. ${res.sentCount} sent, ${res.total-res.sentCount} remaining.${statsStr} ${res.error||''}`);}else if(res.status==='partial'){setNotice(`Broadcast finished with issues: ${res.sentCount} sent, ${res.failedCount} failed.${statsStr} ${res.error||''}`);}else{setNotice(`Broadcast status: ${res.status}.${statsStr} ${res.error||''}`);}}});}
  function navigate(p){setPage(p);setError('');setNotice('');if(p==='Compose'&&!compose.id)setCompose(c=>({...c,id:crypto.randomUUID()}));if(p==='Campaigns')setSelectedCampaignId(null);}
- return <div className="shell"><aside><a className="brand" href="/"><span className="brandmark">E</span>EmailSender<span className="branddot">.</span></a><p className="navlabel">WORKSPACE</p><nav>{[['Overview','◫'],['Campaigns','📢'],['Connected','⇄'],['Personas','◎'],['Compose','↗'],['Mailbox','▤'],['Deployment','⌘']].map(([p,icon])=><button key={p} className={(page===p||(p==='Connected'&&page==='Connections'))?'active':''} onClick={()=>{if(p==='Connected')setConnectedTab('capacity');if(p==='Campaigns')setSelectedCampaignId(null);navigate(p);}}><span>{icon}</span>{p}{p==='Connected'&&<small>{senders.length}</small>}{p==='Campaigns'&&<small>{(data.campaigns||[]).length}</small>}</button>)}</nav><div className="sidebarfoot"><span className="dot"/>Private workspace<p>Vercel · Neon · Cloudflare</p><button className="link" onClick={()=>run(async()=>{await api('logout',{});location.href='/login';})}>Sign out</button></div></aside><main><header><div><p className="eyebrow">EMAIL WORKSPACE / {(page==='Connections'?'CONNECTED':page).toUpperCase()}</p><h1>{({Overview:'Your mail, connected.',Campaigns:'Targeted email broadcasts.',Connected:'Platform capacity and usage.',Connections:'Connect your platforms.',Personas:'Choose who you send as.',Compose:'A new conversation.',Mailbox:'Your conversations.',Deployment:'Ready to go live.'})[page]}</h1></div><button onClick={()=>navigate('Compose')}>+ Compose email</button></header>{error&&<div role="alert" className="alert error">{error}</div>}{notice&&<div role="status" className="alert success">{notice}</div>}{loading&&<p className="muted">Loading your workspace…</p>}
+ return <div className="shell"><aside><a className="brand" href="/"><span className="brandmark">E</span>EmailSender<span className="branddot">.</span></a><p className="navlabel">WORKSPACE</p><nav>{[['Overview','◫'],['Campaigns','📢'],['Schedules','📅'],['Connected','⇄'],['Personas','◎'],['Compose','↗'],['Mailbox','▤'],['Deployment','⌘']].map(([p,icon])=><button key={p} className={(page===p||(p==='Connected'&&page==='Connections'))?'active':''} onClick={()=>{if(p==='Connected')setConnectedTab('capacity');if(p==='Campaigns')setSelectedCampaignId(null);if(p==='Schedules')setSelectedCalDay(null);navigate(p);}}><span>{icon}</span>{p}{p==='Connected'&&<small>{senders.length}</small>}{p==='Campaigns'&&<small>{(data.campaigns||[]).length}</small>}{p==='Schedules'&&<small>{(data.scheduledBroadcasts||[]).length}</small>}</button>)}</nav><div className="sidebarfoot"><span className="dot"/>Private workspace<p>Vercel · Neon · Cloudflare</p><button className="link" onClick={()=>run(async()=>{await api('logout',{});location.href='/login';})}>Sign out</button></div></aside><main><header><div><p className="eyebrow">EMAIL WORKSPACE / {(page==='Connections'?'CONNECTED':page).toUpperCase()}</p><h1>{({Overview:'Your mail, connected.',Campaigns:'Targeted email broadcasts.',Schedules:'Planned dispatches & calendar capacity.',Connected:'Platform capacity and usage.',Connections:'Connect your platforms.',Personas:'Choose who you send as.',Compose:'A new conversation.',Mailbox:'Your conversations.',Deployment:'Ready to go live.'})[page]}</h1></div><button onClick={()=>navigate('Compose')}>+ Compose email</button></header>{error&&<div role="alert" className="alert error">{error}</div>}{notice&&<div role="status" className="alert success">{notice}</div>}{loading&&<p className="muted">Loading your workspace…</p>}
  {page==='Overview'&&<><section className="stats"><div className="card"><p>Daily sent / Capacity</p><strong>{totalDailySent.toLocaleString()}<small> / {totalDailyCapacity>0?totalDailyCapacity.toLocaleString():'No limit'}</small></strong><progress max={totalDailyCapacity||1} value={totalDailyCapacity?totalDailySent:0}/><div style={{display:'flex',justifyContent:'space-between',fontSize:'11px',color:'var(--muted)',marginTop:'6px'}}><span>{totalDailyCapacity>0?`${Math.max(0,totalDailyCapacity-totalDailySent).toLocaleString()} remaining today`:'No daily cap'}</span><span>{dailyPercent}% used</span></div>{senders.length>0&&activeSenders.length!==senders.length&&<small style={{display:'block',marginTop:'5px',color:'#b07d12'}}>{activeDailyCapacity.toLocaleString()} active capacity ({activeSenders.length}/{senders.length} enabled)</small>}</div><div className="card"><p>Monthly sent / Capacity</p><strong>{totalMonthlySent.toLocaleString()}<small> / {totalMonthlyCapacity>0?totalMonthlyCapacity.toLocaleString():'No limit'}</small></strong><progress max={totalMonthlyCapacity||1} value={totalMonthlyCapacity?totalMonthlySent:0}/><div style={{display:'flex',justifyContent:'space-between',fontSize:'11px',color:'var(--muted)',marginTop:'6px'}}><span>{totalMonthlyCapacity>0?`${Math.max(0,totalMonthlyCapacity-totalMonthlySent).toLocaleString()} remaining`:'No monthly cap'}</span><span>{monthlyPercent}% used</span></div>{senders.length>0&&activeSenders.length!==senders.length&&<small style={{display:'block',marginTop:'5px',color:'#b07d12'}}>{activeMonthlyCapacity.toLocaleString()} active capacity ({activeSenders.length}/{senders.length} enabled)</small>}</div><div className="card"><p>Connected platforms</p><strong>{activeSenders.length}<small> / {senders.length} active</small></strong><p style={{fontSize:'12px',color:'var(--muted)',margin:'10px 0 10px'}}>{data.personas.length} persona{data.personas.length===1?'':'s'} configured</p><button className="link" onClick={()=>{setConnectedTab('capacity');navigate('Connected');}}>View platform details →</button></div></section><div className="sectiontitle"><div><h2>Sending capacity overview</h2><p className="muted">Combined sending quota calculated across your connected platforms.</p></div><div style={{display:'flex',gap:'10px'}}><button className="secondary" onClick={()=>run(refresh)}>Refresh</button><button onClick={()=>{setConnectedTab('capacity');navigate('Connected');}}>View Connected Page →</button></div></div>{!senders.length?<div className="empty card"><div className="emptyicon">⇄</div><h2>Your first connection starts here.</h2><p>Add a sending provider, verify your domain, then create your persona.</p><button onClick={()=>{setConnectedTab('settings');navigate('Connected');}}>Connect a platform →</button></div>:<div className="card" style={{padding:'24px'}}><div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',flexWrap:'wrap',gap:'16px',marginBottom:'20px'}}><div><h3 style={{fontSize:'17px',marginBottom:'4px'}}>Platforms Capacity Breakdown</h3><p className="muted" style={{margin:0}}>{senders.length} connected platform{senders.length===1?'':'s'} ({activeSenders.length} active) providing {totalDailyCapacity.toLocaleString()} daily and {totalMonthlyCapacity.toLocaleString()} monthly sending capacity.</p></div><button className="link" onClick={()=>{setConnectedTab('capacity');navigate('Connected');}}>Full platform meters & reset schedules →</button></div><div style={{display:'grid',gap:'10px'}}>{senders.map(c=>{const dUsed=getDailySent(c),dLimit=getDailyLimit(c),mUsed=getMonthlySent(c),mLimit=getMonthlyLimit(c);return <div key={c.id} style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'12px 16px',background:'var(--bg)',borderRadius:'8px',gap:'16px',flexWrap:'wrap'}}><div style={{display:'flex',alignItems:'center',gap:'10px',minWidth:'170px'}}><div><b style={{fontSize:'14px',display:'block'}}>{c.label}</b><span className="muted" style={{fontSize:'11px'}}>{c.domains.join(', ')}</span></div><span className={'badge '+(c.enabled?'green':'')} style={{marginLeft:'auto'}}>{c.enabled?'Enabled':'Paused'}</span></div><div style={{display:'flex',gap:'20px',fontSize:'12px',alignItems:'center'}}><div><span className="muted" style={{fontSize:'10px',display:'block',textTransform:'uppercase',letterSpacing:'0.5px'}}>Daily allowance</span><b>{dUsed} / {dLimit||'No cap'}</b></div><div><span className="muted" style={{fontSize:'10px',display:'block',textTransform:'uppercase',letterSpacing:'0.5px'}}>Monthly allowance</span><b>{mUsed} / {mLimit||'No cap'}</b></div></div><button className="link" style={{fontSize:'12px'}} onClick={()=>edit(c)}>Manage settings →</button></div>;})}</div><p className="footnote" style={{marginTop:'18px'}}>Quotas are shared by every persona. Provider approval, external usage, hourly limits and actual billing periods may reduce available capacity. For detailed per-platform usage meters and reset timestamps, visit the <button className="link" style={{display:'inline',padding:0,fontSize:'inherit'}} onClick={()=>{setConnectedTab('capacity');navigate('Connected');}}>Connected page</button>.</p></div>}</>}
  {page==='Campaigns'&&<>
   {selectedCampaign?(
@@ -118,12 +126,42 @@ export default function Dashboard(){
        <input required maxLength="255" value={campaignMsg.subject} onChange={e=>setCampaignMsg({...campaignMsg,subject:e.target.value})} placeholder="Subject line for campaign broadcast"/>
       </label>
       <label>Message
-       <textarea required rows="10" maxLength="100000" value={campaignMsg.text} onChange={e=>setCampaignMsg({...campaignMsg,text:e.target.value})} placeholder="Write the email message for your recipients…"/>
+       <textarea required rows="8" maxLength="100000" value={campaignMsg.text} onChange={e=>setCampaignMsg({...campaignMsg,text:e.target.value})} placeholder="Write the email message for your recipients…"/>
       </label>
+      <div style={{background:'var(--bg)',borderRadius:'8px',padding:'12px 14px',border:'1px solid var(--line)',marginBottom:'14px'}}>
+       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'8px'}}>
+        <strong style={{fontSize:'12px',letterSpacing:'0.3px'}}>DISPATCH SCHEDULE</strong>
+        <span className={'badge '+(campaignMsg.sendMode==='schedule'?'':'green')} style={{fontSize:'11px'}}>
+         {campaignMsg.sendMode==='schedule'?'QStash Scheduled Delivery':'Immediate Waterfall'}
+        </span>
+       </div>
+       <div style={{display:'flex',gap:'16px',marginBottom:'8px',fontSize:'13px'}}>
+        <label style={{display:'flex',alignItems:'center',gap:'6px',cursor:'pointer',fontWeight:'normal'}}>
+         <input type="radio" name="sendMode" checked={campaignMsg.sendMode==='now'} onChange={()=>setCampaignMsg({...campaignMsg,sendMode:'now'})}/>
+         Send Immediately
+        </label>
+        <label style={{display:'flex',alignItems:'center',gap:'6px',cursor:'pointer',fontWeight:'normal'}}>
+         <input type="radio" name="sendMode" checked={campaignMsg.sendMode==='schedule'} onChange={()=>setCampaignMsg({...campaignMsg,sendMode:'schedule'})}/>
+         Schedule for Date & Time ⏱
+        </label>
+       </div>
+       {campaignMsg.sendMode==='schedule'&&(
+        <div style={{marginTop:'8px',paddingTop:'8px',borderTop:'1px dashed var(--line)'}}>
+         <label style={{margin:0,fontSize:'12px'}}>Scheduled Date & Time (Your Local Time)
+          <input type="datetime-local" required={campaignMsg.sendMode==='schedule'} value={campaignMsg.scheduledAt} min={new Date(Date.now()+60000).toISOString().slice(0,16)} onChange={e=>setCampaignMsg({...campaignMsg,scheduledAt:e.target.value})}/>
+         </label>
+         <p className="muted" style={{fontSize:'11px',margin:'6px 0 0'}}>
+          Checked against daily capacity for that scheduled date. Picked up by DailyScheduler at 2am and triggered at exact time via QStash.
+         </p>
+        </div>
+       )}
+      </div>
       <div className="composerfoot">
-       <button type="button" className="secondary" disabled={busy} onClick={()=>setCampaignMsg(prev=>({...prev,subject:'',text:''}))}>Clear</button>
+       <button type="button" className="secondary" disabled={busy} onClick={()=>setCampaignMsg(prev=>({...prev,subject:'',text:'',sendMode:'now',scheduledAt:''}))}>Clear</button>
        <p className="muted">Dispatched individually · Deduplicated · Tracked</p>
-       <button disabled={busy||!selectedCampaign.recipients?.length}>{busy?'Broadcasting…':`Send to all ${selectedCampaign.recipients?.length||0} recipients ↗`}</button>
+       <button disabled={busy||!selectedCampaign.recipients?.length||(campaignMsg.sendMode==='schedule'&&!campaignMsg.scheduledAt)}>
+        {busy ? (campaignMsg.sendMode==='schedule'?'Scheduling…':'Broadcasting…') : (campaignMsg.sendMode==='schedule'?`Schedule for ${selectedCampaign.recipients?.length||0} recipients ⏱`:`Send to all ${selectedCampaign.recipients?.length||0} recipients ↗`)}
+       </button>
       </div>
      </form>
      <div style={{display:'flex',flexDirection:'column',gap:'20px'}}>
@@ -167,11 +205,14 @@ export default function Dashboard(){
            <div key={m.id} style={{padding:'12px',background:'var(--bg)',borderRadius:'8px',border:'1px solid var(--line)'}}>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:'8px'}}>
              <b style={{fontSize:'13px'}}>{m.subject}</b>
-             <span className={'badge '+(m.status==='completed'?'green':m.status==='quota-stopped'?'':m.status==='failed'?'danger':'')}>{m.status}</span>
+             <div style={{display:'flex',gap:'6px',alignItems:'center'}}>
+              <span className={'badge '+(m.status==='completed'?'green':m.status==='scheduled'?'':m.status==='quota-stopped'?'':m.status==='failed'?'danger':'')}>{m.status}</span>
+              {m.status==='scheduled'&&<button type="button" className="link danger" style={{fontSize:'11px'}} onClick={()=>cancelScheduledBroadcast(m.id)}>Cancel</button>}
+             </div>
             </div>
             <div style={{display:'flex',justifyContent:'space-between',fontSize:'11px',color:'var(--muted)',marginTop:'6px',flexWrap:'wrap',gap:'6px'}}>
              <span>{m.sent_count} sent · {m.failed_count} failed ({m.total_recipients} total)</span>
-             <time>{fmt(m.created_at)}</time>
+             <time>{m.scheduled_at ? `Scheduled: ${fmt(m.scheduled_at)}` : fmt(m.created_at)}</time>
             </div>
             {stats && (
              <div style={{marginTop:'6px',display:'flex',flexWrap:'wrap',gap:'4px'}}>
@@ -257,6 +298,156 @@ export default function Dashboard(){
    </div>
   )}
  </>}
+ {page==='Schedules'&&(()=>{
+  const monthNames=['January','February','March','April','May','June','July','August','September','October','November','December'];
+  const daysInMonth=new Date(calYear,calMonth,0).getDate();
+  const firstDayOfWeek=new Date(calYear,calMonth-1,1).getDay();
+  const prevMonthDays=new Date(calYear,calMonth-1,0).getDate();
+  const todayStr=new Date().toISOString().slice(0,10);
+  const monthTitle=`${monthNames[calMonth-1]} ${calYear}`;
+
+  function prevMonth(){if(calMonth===1){setCalMonth(12);setCalYear(y=>y-1);}else{setCalMonth(m=>m-1);}}
+  function nextMonth(){if(calMonth===12){setCalMonth(1);setCalYear(y=>y+1);}else{setCalMonth(m=>m+1);}}
+  function goToday(){const n=new Date();setCalMonth(n.getMonth()+1);setCalYear(n.getFullYear());}
+
+  const daysData=calData?.days||{};
+  const totalMonthBooked=Object.values(daysData).reduce((n,d)=>n+(d.bookedEmails||0),0);
+  const totalScheduledBroadcasts=Object.values(daysData).reduce((n,d)=>n+(d.broadcasts?.filter(b=>b.status==='scheduled').length||0),0);
+
+  const gridCells=[];
+  // Padding from previous month
+  for(let p=firstDayOfWeek-1;p>=0;p--){
+   const pDay=prevMonthDays-p;
+   gridCells.push(<div key={`prev-${pDay}`} style={{padding:'10px',background:'rgba(240,240,240,0.4)',border:'1px solid var(--line)',minHeight:'110px',borderRadius:'6px',opacity:0.4}}>
+    <span style={{fontSize:'12px',fontWeight:'bold',color:'var(--muted)'}}>{pDay}</span>
+   </div>);
+  }
+  // Days of current month
+  for(let day=1;day<=daysInMonth;day++){
+   const dayKey=`${calYear}-${String(calMonth).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+   const dayInfo=daysData[dayKey]||{date:dayKey,day,totalCapacity:activeDailyCapacity,bookedEmails:0,availableCapacity:activeDailyCapacity,broadcasts:[]};
+   const isToday=dayKey===todayStr;
+   const isSelected=selectedCalDay===dayKey;
+   const booked=dayInfo.bookedEmails||0;
+   const totalCap=dayInfo.totalCapacity||activeDailyCapacity;
+   const capPct=totalCap>0?Math.min(100,Math.round((booked/totalCap)*100)):0;
+
+   gridCells.push(
+    <div key={dayKey} onClick={()=>setSelectedCalDay(isSelected?null:dayKey)} style={{padding:'10px',background:isSelected?'rgba(99,102,241,0.06)':isToday?'rgba(16,185,129,0.04)':'#fff',border:isSelected?'2px solid #6366f1':isToday?'2px solid #10b981':'1px solid var(--line)',borderRadius:'8px',minHeight:'120px',cursor:'pointer',display:'flex',flexDirection:'column',gap:'6px',transition:'all 0.15s ease'}}>
+     <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+      <div style={{display:'flex',alignItems:'center',gap:'6px'}}>
+       <b style={{fontSize:'14px',color:isToday?'#10b981':'inherit'}}>{day}</b>
+       {isToday&&<span className="badge green" style={{fontSize:'9px',padding:'1px 5px'}}>TODAY</span>}
+      </div>
+      <span className={'badge '+(booked>=totalCap?'danger':booked>totalCap*0.7?'':booked>0?'green':'')} style={{fontSize:'10px',padding:'2px 6px'}}>
+       {booked>0?`${booked}/${totalCap}`:`${totalCap} free`}
+      </span>
+     </div>
+     {booked>0&&(
+      <div style={{width:'100%',background:'var(--line)',height:'4px',borderRadius:'2px',overflow:'hidden'}}>
+       <div style={{width:`${capPct}%`,height:'100%',background:capPct>=100?'#ef4444':capPct>70?'#f59e0b':'#10b981'}}/>
+      </div>
+     )}
+     <div style={{display:'flex',flexDirection:'column',gap:'4px',marginTop:'2px',flex:1,overflowY:'auto'}}>
+      {(dayInfo.broadcasts||[]).map(b=>(
+       <div key={b.id} style={{padding:'4px 6px',background:'var(--bg)',borderRadius:'4px',fontSize:'11px',borderLeft:`3px solid ${b.status==='completed'?'#10b981':b.status==='scheduled'?'#6366f1':b.status==='failed'?'#ef4444':'#9ca3af'}`}}>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:'4px'}}>
+         <b style={{whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',maxWidth:'85px'}}>{b.campaign_name||'Campaign'}</b>
+         <time style={{color:'var(--muted)',fontSize:'10px'}}>{new Date(b.scheduled_at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</time>
+        </div>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',fontSize:'10px',color:'var(--muted)',marginTop:'2px'}}>
+         <span>{b.total_recipients} emails</span>
+         <span style={{textTransform:'capitalize',fontSize:'9px'}}>{b.status}</span>
+        </div>
+       </div>
+      ))}
+     </div>
+    </div>
+   );
+  }
+
+  const selectedDayData=selectedCalDay?daysData[selectedCalDay]:null;
+
+  return (
+   <div>
+    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'20px',flexWrap:'wrap',gap:'14px'}}>
+     <div style={{display:'flex',alignItems:'center',gap:'12px'}}>
+      <h2 style={{margin:0,fontSize:'22px'}}>{monthTitle}</h2>
+      <div style={{display:'flex',gap:'6px'}}>
+       <button className="secondary" style={{padding:'6px 12px',fontSize:'12px'}} onClick={prevMonth}>← Prev</button>
+       <button className="secondary" style={{padding:'6px 12px',fontSize:'12px'}} onClick={goToday}>Today</button>
+       <button className="secondary" style={{padding:'6px 12px',fontSize:'12px'}} onClick={nextMonth}>Next →</button>
+      </div>
+      {calLoading&&<small className="muted">Refreshing calendar…</small>}
+     </div>
+     <div style={{display:'flex',gap:'12px',alignItems:'center',flexWrap:'wrap'}}>
+      <div className="card" style={{padding:'8px 16px',display:'flex',gap:'12px',alignItems:'center',margin:0}}>
+       <div><span className="muted" style={{fontSize:'10px',display:'block'}}>DAILY CAPACITY</span><b>{activeDailyCapacity.toLocaleString()} emails/day</b></div>
+       <div style={{borderLeft:'1px solid var(--line)',paddingLeft:'12px'}}><span className="muted" style={{fontSize:'10px',display:'block'}}>SCHEDULED BROADCASTS</span><b>{totalScheduledBroadcasts} pending</b></div>
+       <div style={{borderLeft:'1px solid var(--line)',paddingLeft:'12px'}}><span className="muted" style={{fontSize:'10px',display:'block'}}>BOOKED THIS MONTH</span><b>{totalMonthBooked.toLocaleString()} emails</b></div>
+      </div>
+     </div>
+    </div>
+
+    <div style={{display:'grid',gridTemplateColumns:'repeat(7, 1fr)',gap:'8px',marginBottom:'8px',textAlign:'center'}}>
+     {['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map(d=>(
+      <div key={d} style={{fontSize:'12px',fontWeight:'bold',color:'var(--muted)',padding:'6px 0',textTransform:'uppercase',letterSpacing:'0.5px'}}>{d}</div>
+     ))}
+    </div>
+
+    <div style={{display:'grid',gridTemplateColumns:'repeat(7, 1fr)',gap:'8px',marginBottom:'24px'}}>
+     {gridCells}
+    </div>
+
+    {selectedDayData&&(
+     <div className="card" style={{padding:'20px',marginTop:'16px',borderLeft:'4px solid #6366f1'}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'12px',flexWrap:'wrap',gap:'8px'}}>
+       <div>
+        <h3 style={{margin:0}}>Day Details: {selectedDayData.date}</h3>
+        <p className="muted" style={{fontSize:'12px',margin:'2px 0 0'}}>
+         {selectedDayData.bookedEmails} / {selectedDayData.totalCapacity} emails booked ({selectedDayData.availableCapacity} remaining capacity for this date)
+        </p>
+       </div>
+       <button className="secondary" style={{padding:'6px 12px',fontSize:'12px'}} onClick={()=>setSelectedCalDay(null)}>Close details ✕</button>
+      </div>
+      {!(selectedDayData.broadcasts||[]).length?(
+       <p className="muted" style={{margin:'10px 0'}}>No broadcasts scheduled on this day. Full daily capacity of {selectedDayData.totalCapacity} is available.</p>
+      ):(
+       <div style={{display:'grid',gap:'10px'}}>
+        {selectedDayData.broadcasts.map(b=>(
+         <div key={b.id} style={{padding:'12px',background:'var(--bg)',borderRadius:'8px',border:'1px solid var(--line)',display:'flex',justifyContent:'space-between',alignItems:'center',gap:'12px',flexWrap:'wrap'}}>
+          <div>
+           <div style={{display:'flex',alignItems:'center',gap:'8px'}}>
+            <b>{b.campaign_name}</b>
+            <span className={'badge '+(b.status==='completed'?'green':b.status==='scheduled'?'':b.status==='failed'?'danger':'')}>{b.status}</span>
+            <small className="muted">{fmt(b.scheduled_at)}</small>
+           </div>
+           <p style={{fontSize:'13px',margin:'4px 0 0'}}>{b.subject}</p>
+           <small className="muted">{b.total_recipients} recipient(s) · Sender: {b.persona_name} ({b.persona_email})</small>
+          </div>
+          {b.status==='scheduled'&&(
+           <button type="button" className="secondary danger" style={{fontSize:'12px',padding:'6px 14px'}} disabled={busy} onClick={()=>cancelScheduledBroadcast(b.id)}>
+            Cancel Schedule
+           </button>
+          )}
+         </div>
+        ))}
+       </div>
+      )}
+     </div>
+    )}
+
+    <div className="card" style={{padding:'16px 20px',marginTop:'18px',fontSize:'12px',color:'var(--muted)',lineHeight:'1.6'}}>
+     <b style={{color:'inherit',display:'block',marginBottom:'4px'}}>🗓 How the Scheduling Architecture Operates:</b>
+     <span>1. <b>Capacity Reservation</b>: Scheduling a broadcast reserves recipient count against that specific future day&apos;s daily capacity.</span><br/>
+     <span>2. <b>DailyScheduler.js</b>: Trigger.dev runs a task at 2:00 AM UTC every day that searches the database for that day&apos;s scheduled broadcasts.</span><br/>
+     <span>3. <b>QStash Exact Trigger</b>: The task enqueues QStash to trigger the app at the exact minute scheduled. Broadcasts scheduled same-day are also queued immediately.</span><br/>
+     <span>4. <b>CampaignMailSender.js</b>: When the QStash webhook fires, Trigger.dev executes multi-platform waterfall sending across all active platforms.</span>
+    </div>
+   </div>
+  );
+ })()}
+
  {(page==='Connected'||page==='Connections')&&<><div className="sectiontitle" style={{marginBottom:'24px'}}><div className="tabs"><button className={connectedTab==='capacity'?'selected':''} onClick={()=>setConnectedTab('capacity')}>Platform Capacity & Usage</button><button className={connectedTab==='settings'?'selected':''} onClick={()=>setConnectedTab('settings')}>Platform Settings & Connect</button></div>{connectedTab==='capacity'?<div style={{display:'flex',gap:'10px'}}><button className="secondary" onClick={()=>run(refresh)}>Refresh</button><button onClick={()=>{setConnection(initialConnection('brevo'));setInspect(null);setConnectedTab('settings');}}>＋ New platform</button></div>:<button className="secondary" onClick={()=>run(refresh)}>Refresh</button>}</div>{connectedTab==='capacity'&&<>{!senders.length?<div className="empty card"><div className="emptyicon">⇄</div><h2>Your first connection starts here.</h2><p>Add a sending provider, verify your domain, then create your persona.</p><button onClick={()=>setConnectedTab('settings')}>Connect a platform →</button></div>:<div className="providergrid">{senders.map(c=><div className="card" key={c.id}><div className="cardtitle"><div><h3 style={{marginBottom:'2px'}}>{c.label}</h3><small style={{color:'var(--muted)'}}>{providers[c.provider]?.name||c.provider}</small></div><span className={'badge '+(c.enabled?'green':'')}>{c.enabled?'Enabled':'Paused'}</span></div><p className="muted" style={{marginTop:'8px',marginBottom:'12px'}}>{c.domains.join(', ')}</p>{c.usage.map(w=><div className="meter" key={w.name}><div><span>{w.name==='30-day'?'Your 30-day period':w.name==='provider-month'?'Provider month':'Today (UTC)'}</span><b>{w.used} / {w.limit??'No app cap'}</b></div><progress max={w.limit||1} value={w.limit?w.used:0}/><small>{w.limit?`${Math.max(0,w.limit-w.used)} remaining · `:''}Resets {fmt(w.end)}</small></div>)}<div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginTop:'14px',paddingTop:'12px',borderTop:'1px solid var(--line)'}}><button className="link" onClick={()=>edit(c)}>Manage settings →</button><div style={{display:'flex',gap:'12px',alignItems:'center'}}><button type="button" className="link" disabled={busy} onClick={()=>run(async()=>setInspect(await api('inspect',{id:c.id})))}>Check setup</button><button type="button" className="link danger" disabled={busy} onClick={()=>deleteConnection(c)}>Delete</button></div></div>{inspect&&inspect.id===c.id&&<pre className="code" style={{marginTop:'12px'}}>{JSON.stringify(inspect,null,2)}</pre>}</div>)}</div>}<p className="footnote">Quotas are shared by every persona. Provider approval, external usage, hourly limits and actual billing periods may reduce available capacity.</p></>}{connectedTab==='settings'&&<div className="columns"><section><div className="sectiontitle"><h2>Connected accounts</h2><button className="secondary" onClick={()=>{setConnection(initialConnection('brevo'));setInspect(null);}}>＋ New</button></div>{data.connections.map(c=><div className="connectionrow card" key={c.id}><div style={{flex:1,cursor:'pointer'}} onClick={()=>edit(c)}><b>{c.label}</b><p>{c.domains.join(', ')}</p></div><div className="connectionbtns"><span className={'badge '+(c.enabled?'green':'')}>{c.enabled?'Enabled':'Paused'}</span><button type="button" className="link danger" disabled={busy} onClick={()=>deleteConnection(c)}>Delete</button></div></div>)}{!data.connections.length&&<p className="muted">Your connected accounts will appear here.</p>}<div className="hint">One connection per platform keeps account quotas shared. Add all verified domains to that connection.</div></section><form className="card form" onSubmit={e=>{e.preventDefault();run(async()=>{await api('connections',connection);await refresh();setNotice('Connection saved. Existing credentials and tracking start date are preserved.');setConnection(c=>({...c,credentials:{}}));});}}><h2>Platform settings</h2><label>Platform<select value={connection.provider} onChange={e=>{const existing=data.connections.find(c=>c.provider===e.target.value);existing?edit(existing):setConnection(initialConnection(e.target.value));setInspect(null);}}>{Object.entries(providers).map(([id,p])=><option key={id} value={id}>{p.name}</option>)}</select></label><label>Connection name<input required value={connection.label} onChange={e=>field('label',e.target.value)}/></label><label>Verified domains (comma separated)<input required placeholder="yourdomain.com" value={connection.domains} onChange={e=>field('domains',e.target.value)}/></label><div className="hint"><b>Domain setup</b><p>{providers[connection.provider].steps}</p><a href={providers[connection.provider].url} target="_blank" rel="noreferrer">Official instructions ↗</a></div>{providers[connection.provider].fields.map(k=><label key={k}>{({apiKey:connection.provider==='cloudflare'?'Cloudflare API token (optional)':'API / sending key',apiSecret:'API secret',domainId:'Domain ID (for status check)',webhookSecret:'Webhook signing secret (optional)',sendingDomain:'Mailgun sending domain',accountId:'Cloudflare account ID',zoneId:'Cloudflare zone ID'})[k]}<input type={/Key|Secret/.test(k)?'password':'text'} autoComplete="off" value={connection.credentials[k]||''} placeholder="Leave blank to keep saved value" onChange={e=>field('credentials',{...connection.credentials,[k]:e.target.value})}/></label>)}{connection.provider==='mailgun'&&<label>Region<select value={connection.region} onChange={e=>field('region',e.target.value)}><option value="us">US</option><option value="eu">EU</option></select></label>}{connection.provider!=='cloudflare'&&<><div className="row"><label>Daily limit<input type="number" min="1" value={connection.dailyLimit} onChange={e=>field('dailyLimit',e.target.value)}/></label><label>Your 30-day limit<input type="number" min="1" value={connection.monthlyLimit} onChange={e=>field('monthlyLimit',e.target.value)}/></label></div><details><summary>Provider billing period</summary><label>Provider monthly limit<input type="number" min="1" value={connection.providerMonthlyLimit} onChange={e=>field('providerMonthlyLimit',e.target.value)}/></label><label>Provider reset rule<select value={connection.providerCycle} onChange={e=>field('providerCycle',e.target.value)}><option value="calendar">Calendar month (UTC)</option><option value="30days">Every 30 days from provider period start</option><option value="billing">Monthly anniversary of provider period start</option></select></label><label>Provider period start (UTC ISO date)<input value={connection.providerAnchor} onChange={e=>field('providerAnchor',e.target.value)}/></label><p className="muted">Set this from your provider dashboard. Pause before changing it. Blank limits mean no app cap; they do not remove provider limits.</p></details></>}<p className="muted">{providers[connection.provider].note}</p><label className="check"><input type="checkbox" checked={connection.enabled} onChange={e=>field('enabled',e.target.checked)}/>I completed domain verification and want this connection enabled.</label><div className="row"><button disabled={busy}>Save connection</button><button type="button" className="secondary" disabled={busy||!data.connections.some(c=>c.provider===connection.provider)} onClick={()=>run(async()=>setInspect(await api('inspect',{id:data.connections.find(c=>c.provider===connection.provider).id})))}>Check setup</button>{data.connections.some(c=>c.provider===connection.provider)&&<button type="button" className="secondary danger" disabled={busy} onClick={()=>deleteConnection(data.connections.find(c=>c.provider===connection.provider))}>Delete connection</button>}</div>{inspect&&<pre className="code">{JSON.stringify(inspect,null,2)}</pre>}</form></div>}</>}
  {page==='Personas'&&<div className="columns"><section><h2>Your sender identities</h2>{data.personas.map(p=><div className="card person" key={p.id}><div className="avatar">{p.name.slice(0,1).toUpperCase()}</div><div><h3>{p.name}</h3><p>{p.email}</p><small>Access to all sending connections</small></div><div className="personbtns"><button type="button" className="link" onClick={()=>setPersona({name:p.name,email:p.email})}>Edit name</button><button type="button" className="link danger" disabled={busy} onClick={()=>deletePersona(p)}>Delete</button></div></div>)}{!data.personas.length&&<p className="muted">Create your first sender persona.</p>}</section><form className="card form" onSubmit={e=>{e.preventDefault();run(async()=>{await api('personas',persona);await refresh();setPersona({name:'',email:''});setNotice('Persona saved and available across all sending platforms.');});}}><h2>Create a persona</h2><label>Sender name<input required value={persona.name} onChange={e=>setPersona({...persona,name:e.target.value})} placeholder="Chima"/></label><label>Sender email<input type="email" required value={persona.email} onChange={e=>setPersona({...persona,email:e.target.value})} placeholder="chima@yourdomain.com"/></label><p className="muted">No platform assignment needed. The sender domain must be verified on the platform you choose at send time.</p><button disabled={busy}>Save persona</button></form></div>}
  {page==='Compose'&&<form className="card form composer" onSubmit={e=>{e.preventDefault();run(async()=>{const id=compose.id||crypto.randomUUID();setCompose(c=>({...c,id}));const r=await api('send',{...compose,id});await refresh();if(r.status==='accepted'){setNotice('Accepted by the provider. Saved in Sent.');setCompose(c=>({...c,id:crypto.randomUUID(),text:'',subject:'',parentId:null}));}else {setCompose(c=>({...c,id:crypto.randomUUID()}));setNotice(`Status: ${r.status}. ${r.status==='failed'?'Correct the provider issue before retrying.':'Check Sent and provider logs before trying again.'} ${r.error||''}`);}});}}><div className="row"><label>Sender persona<select required value={compose.personaId} onChange={e=>setCompose({...compose,personaId:e.target.value})}><option value="">Choose a persona</option>{data.personas.map(p=><option value={p.id} key={p.id}>{p.name} — {p.email}</option>)}</select></label><label>Sending platform<select required value={compose.connectionId} onChange={e=>setCompose({...compose,connectionId:e.target.value})}><option value="">Choose a platform</option>{senders.map(c=><option key={c.id} value={c.id} disabled={!c.enabled||!!selectedPersona&&!c.domains.includes(selectedPersona.email.split('@')[1])}>{c.label}{!c.enabled?' — paused':selectedPersona&&!c.domains.includes(selectedPersona.email.split('@')[1])?' — verify domain':''}</option>)}</select></label></div>{['gosend','sequenzy'].includes(senders.find(c=>c.id===compose.connectionId)?.provider)&&<div className="hint">This platform does not document custom threading headers. Your app can retain the reply relationship, but the recipient’s mail client may show a separate conversation. GoSend also lacks documented custom Reply-To support.</div>}<label>To<input type="email" required value={compose.to} onChange={e=>setCompose({...compose,to:e.target.value})} placeholder="recipient@example.com"/></label><label>Subject<input required maxLength="255" value={compose.subject} onChange={e=>setCompose({...compose,subject:e.target.value})} placeholder="What would you like to say?"/></label><label>Message<textarea required rows="14" maxLength="100000" value={compose.text} onChange={e=>setCompose({...compose,text:e.target.value})} placeholder="Write your message…"/></label><div className="composerfoot"><button type="button" className="secondary" disabled={busy} onClick={()=>setCompose(c=>({...c,id:crypto.randomUUID(),to:'',subject:'',text:'',parentId:null}))}>New message</button><p className="muted">One recipient per send · Saved to Sent automatically</p><button disabled={busy}>{busy?'Sending…':'Send email ↗'}</button></div></form>}

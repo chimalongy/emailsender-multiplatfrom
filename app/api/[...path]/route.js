@@ -8,6 +8,8 @@ import { providers } from '../../../lib/catalog.js';
 import { buildRequest, inspectDomain, sendEmail } from '../../../lib/providers.js';
 import { domain, email, fail, line, limit, uuid, parseEmailList } from '../../../lib/validation.js';
 import { messageStore } from '../../../lib/d1.js';
+import { Client as QStashClient, Receiver as QStashReceiver } from '@upstash/qstash';
+import { dispatchCampaignMessage } from '../../../lib/campaign-dispatcher.js';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
@@ -43,7 +45,46 @@ async function ensureCampaignTables(sql) {
         );
     `;
     await sql`ALTER TABLE campaign_messages ADD COLUMN IF NOT EXISTS platform_stats jsonb NOT NULL DEFAULT '{}';`;
+    await sql`ALTER TABLE campaign_messages ADD COLUMN IF NOT EXISTS scheduled_at timestamptz;`;
+    await sql`ALTER TABLE campaign_messages ADD COLUMN IF NOT EXISTS qstash_message_id text;`;
     campaignTablesChecked = true;
+}
+async function getCapacityForDate(sql, dateObj) {
+    const connections = await sql`SELECT id, provider, daily_limit FROM connections WHERE provider<>'cloudflare' AND enabled=true`;
+    if (!connections.length) return 0;
+    let totalDailyCapacity = 0;
+    for (const c of connections) {
+        const limitVal = (c.daily_limit !== null && c.daily_limit !== undefined) 
+            ? Number(c.daily_limit) 
+            : (providers[c.provider]?.daily || 100000);
+        totalDailyCapacity += limitVal;
+    }
+    const dateStr = dateObj.toISOString().slice(0, 10);
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const [scheduledRow] = await sql`
+        SELECT COALESCE(SUM(total_recipients), 0)::int as booked
+        FROM campaign_messages
+        WHERE status IN ('scheduled', 'sending', 'completed')
+          AND scheduled_at::date = ${dateStr}::date
+    `;
+    let booked = scheduledRow?.booked || 0;
+    if (dateStr === todayStr) {
+        const usageRows = await sql`
+            SELECT c.id, w.value || jsonb_build_object('used', coalesce(u.used, 0)) AS window 
+            FROM connections c 
+            CROSS JOIN LATERAL jsonb_array_elements(quota_windows(c)) w 
+            LEFT JOIN usage_counters u ON u.key = c.id::text || ':' || (w.value->>'name') || ':' || (w.value->>'start') 
+            WHERE c.provider<>'cloudflare' AND c.enabled=true
+        `;
+        let sentToday = 0;
+        for (const c of connections) {
+            const cWindows = usageRows.filter(r => r.id === c.id).map(r => r.window);
+            const dayW = cWindows.find(w => w.name === 'day');
+            sentToday += dayW?.used || 0;
+        }
+        booked = Math.max(booked, sentToday);
+    }
+    return Math.max(0, totalDailyCapacity - booked);
 }
 async function getDailyAvailableCapacity(sql) {
     const connections = await sql`SELECT id, provider, daily_limit FROM connections WHERE provider<>'cloudflare' AND enabled=true`;
@@ -78,11 +119,16 @@ async function state() {
         messages: campaignMessages.filter(m => m.campaign_id === c.id)
     }));
     const dailyCapacity = await getDailyAvailableCapacity(sql);
+    const activeSenders = connections.filter(c => c.provider !== 'cloudflare' && c.enabled);
+    const totalDailyCapacity = activeSenders.reduce((n, c) => n + ((c.daily_limit !== null && c.daily_limit !== undefined) ? Number(c.daily_limit) : (providers[c.provider]?.daily || 0)), 0);
+    const scheduledBroadcasts = campaignMessages.filter(m => m.status === 'scheduled');
     return {
         connections: connections.map(c => ({ ...c, usage: usage.filter(u => u.id === c.id).map(u => u.window) })),
         personas: await sql`SELECT * FROM personas ORDER BY name`,
         campaigns: campaignsWithMessages,
         dailyCapacity,
+        totalDailyCapacity,
+        scheduledBroadcasts,
         providers
     };
 }
@@ -109,6 +155,42 @@ async function handler(req, { params }) {
     try {
         const path = (await params).path.join('/');
         if (req.method === 'POST' && path.startsWith('webhooks/')) return await webhook(path.split('/')[1], req, await readBody(req));
+        if (req.method === 'POST' && path === 'campaigns/trigger-scheduled') {
+            const raw = await readBody(req);
+            if (process.env.QSTASH_CURRENT_SIGNING_KEY) {
+                const receiver = new QStashReceiver({
+                    currentSigningKey: process.env.QSTASH_CURRENT_SIGNING_KEY,
+                    nextSigningKey: process.env.QSTASH_NEXT_SIGNING_KEY || process.env.QSTASH_CURRENT_SIGNING_KEY,
+                });
+                const sig = req.headers.get("Upstash-Signature") || req.headers.get("upstash-signature");
+                const valid = await receiver.verify({
+                    signature: sig,
+                    body: raw,
+                    url: req.url,
+                }).catch(() => false);
+                if (!valid) fail('Invalid QStash signature', 401);
+            }
+            const body = JSON.parse(raw);
+            const sql = db();
+            await ensureCampaignTables(sql);
+            const campaignMessageId = uuid(body.campaignMessageId);
+            const [cm] = await sql`SELECT status FROM campaign_messages WHERE id=${campaignMessageId}`;
+            if (!cm || cm.status !== 'scheduled') {
+                return json({ ok: true, skipped: true, status: cm?.status || 'not-found' });
+            }
+            let triggerDevFired = false;
+            try {
+                const { tasks } = await import('@trigger.dev/sdk');
+                if (tasks?.trigger) {
+                    await tasks.trigger("campaign-mail-sender", { campaignMessageId });
+                    triggerDevFired = true;
+                }
+            } catch {}
+            if (!triggerDevFired) {
+                await dispatchCampaignMessage({ campaignMessageId, sql });
+            }
+            return json({ ok: true });
+        }
         if (req.method === 'POST' && path === 'login') {
             const body = JSON.parse(await readBody(req, 2000));
             if (!passwordOK(body.password, body.email)) fail('Incorrect email or password', 401);
@@ -118,6 +200,63 @@ async function handler(req, { params }) {
 
         await authenticated(req);
         if (req.method === 'GET' && path === 'state') return json(await state());
+        if (req.method === 'GET' && path === 'campaigns/calendar') {
+            const sql = db();
+            await ensureCampaignTables(sql);
+            const url = new URL(req.url);
+            const now = new Date();
+            const year = parseInt(url.searchParams.get('year') || String(now.getFullYear()), 10);
+            const month = parseInt(url.searchParams.get('month') || String(now.getMonth() + 1), 10);
+            const startDate = new Date(Date.UTC(year, month - 1, 1));
+            const endDate = new Date(Date.UTC(year, month, 1));
+            const connections = await sql`SELECT id, provider, daily_limit FROM connections WHERE provider<>'cloudflare' AND enabled=true`;
+            let totalDailyCapacity = 0;
+            for (const c of connections) {
+                const limitVal = (c.daily_limit !== null && c.daily_limit !== undefined) 
+                    ? Number(c.daily_limit) 
+                    : (providers[c.provider]?.daily || 100000);
+                totalDailyCapacity += limitVal;
+            }
+            const broadcasts = await sql`
+                SELECT cm.*, c.name as campaign_name, p.name as persona_name, p.email as persona_email
+                FROM campaign_messages cm
+                JOIN campaigns c ON c.id = cm.campaign_id
+                LEFT JOIN personas p ON p.id = cm.persona_id
+                WHERE cm.scheduled_at >= ${startDate.toISOString()} AND cm.scheduled_at < ${endDate.toISOString()}
+                ORDER BY cm.scheduled_at ASC
+            `;
+            const daysInMonth = new Date(Date.UTC(year, month, 0)).getDate();
+            const daysData = {};
+            for (let day = 1; day <= daysInMonth; day++) {
+                const dayStr = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+                daysData[dayStr] = {
+                    date: dayStr,
+                    day,
+                    totalCapacity: totalDailyCapacity,
+                    bookedEmails: 0,
+                    availableCapacity: totalDailyCapacity,
+                    broadcasts: []
+                };
+            }
+            for (const b of broadcasts) {
+                const dateKey = new Date(b.scheduled_at).toISOString().slice(0, 10);
+                if (daysData[dateKey]) {
+                    daysData[dateKey].broadcasts.push(b);
+                    if (['scheduled', 'sending', 'completed'].includes(b.status)) {
+                        daysData[dateKey].bookedEmails += b.total_recipients || 0;
+                    }
+                }
+            }
+            for (const key of Object.keys(daysData)) {
+                daysData[key].availableCapacity = Math.max(0, daysData[key].totalCapacity - daysData[key].bookedEmails);
+            }
+            return json({
+                year,
+                month,
+                totalDailyCapacity,
+                days: daysData
+            });
+        }
         const sql = db();
         if (req.method === 'GET' && path === 'messages') {
             const url = new URL(req.url), thread = url.searchParams.get('thread'), folder = url.searchParams.get('folder') === 'sent' ? 'out' : 'in';
@@ -252,6 +391,25 @@ async function handler(req, { params }) {
             const [inserted] = await sql`INSERT INTO campaigns(name, recipients) VALUES(${name}, ${JSON.stringify(recipients)}::jsonb) RETURNING *`;
             return json({ ok: true, campaign: inserted });
         }
+        if (path === 'campaigns/cancel-schedule') {
+            await ensureCampaignTables(sql);
+            const id = uuid(p.id);
+            const [cm] = await sql`SELECT * FROM campaign_messages WHERE id=${id}`;
+            if (!cm) fail('Scheduled broadcast not found', 404);
+            if (cm.status !== 'scheduled') fail(`Cannot cancel broadcast with status "${cm.status}"`, 400);
+
+            if (cm.qstash_message_id && process.env.QSTASH_TOKEN) {
+                try {
+                    const qstash = new QStashClient({ token: process.env.QSTASH_TOKEN });
+                    await qstash.messages.delete(cm.qstash_message_id);
+                } catch (e) {
+                    console.warn('Could not delete QStash message:', e.message);
+                }
+            }
+
+            await sql`UPDATE campaign_messages SET status='cancelled', qstash_message_id=NULL WHERE id=${id}`;
+            return json({ ok: true, cancelled: true });
+        }
         if (path === 'campaigns/send') {
             await ensureCampaignTables(sql);
             const campaignId = uuid(p.campaignId);
@@ -266,207 +424,67 @@ async function handler(req, { params }) {
 
             const [persona] = await sql`SELECT * FROM personas WHERE id=${uuid(p.personaId)}`;
             if (!persona) fail('Choose a sender persona', 400);
-            const senderDomain = persona.email.split('@')[1];
 
-            // 1. Discover all active sending platforms that verified this persona's domain
-            const activeConnections = await sql`SELECT * FROM connections WHERE provider<>'cloudflare' AND enabled=true ORDER BY connected_at ASC`;
-            const eligibleConnections = activeConnections.filter(c => {
-                const domains = Array.isArray(c.domains) ? c.domains : (typeof c.domains === 'string' ? JSON.parse(c.domains || '[]') : []);
-                return domains.includes(senderDomain);
-            });
+            // Is this a scheduled broadcast?
+            if (p.scheduledAt) {
+                const scheduledDate = new Date(p.scheduledAt);
+                if (isNaN(scheduledDate.getTime())) fail('Invalid scheduled date/time', 400);
+                if (scheduledDate.getTime() <= Date.now() + 30000) fail('Scheduled time must be at least 30 seconds in the future', 400);
 
-            if (!eligibleConnections.length) {
-                fail(`No enabled sending platforms have verified domain "${senderDomain}". Please add or verify this domain in Connections.`, 400);
-            }
-
-            // 2. Fetch current quota usage for eligible connections
-            const connIds = eligibleConnections.map(c => c.id);
-            const usageRows = await sql`
-                SELECT c.id, w.value || jsonb_build_object('used', coalesce(u.used, 0)) AS window 
-                FROM connections c 
-                CROSS JOIN LATERAL jsonb_array_elements(quota_windows(c)) w 
-                LEFT JOIN usage_counters u ON u.key = c.id::text || ':' || (w.value->>'name') || ':' || (w.value->>'start') 
-                WHERE c.id = ANY(${connIds})
-            `;
-
-            // 3. Build platform pool with remaining capacity
-            const platformPool = [];
-            for (const c of eligibleConnections) {
-                const cWindows = usageRows.filter(r => r.id === c.id).map(r => r.window);
-                const dayW = cWindows.find(w => w.name === 'day');
-                const limitVal = (c.daily_limit !== null && c.daily_limit !== undefined) ? Number(c.daily_limit) : (providers[c.provider]?.daily || 100000);
-                const used = dayW?.used || 0;
-                const remaining = Math.max(0, limitVal - used);
-                if (remaining > 0) {
-                    platformPool.push({
-                        connection: c,
-                        credentials: decrypt(c.credentials),
-                        remaining,
-                        sentThisBatch: 0
-                    });
+                const availableForDate = await getCapacityForDate(sql, scheduledDate);
+                if (recipients.length > availableForDate) {
+                    fail(`Cannot schedule campaign: Recipient list has ${recipients.length} emails, but available daily sending capacity for ${scheduledDate.toISOString().slice(0, 10)} is only ${availableForDate}.`, 400);
                 }
+
+                const [campaignMsg] = await sql`
+                    INSERT INTO campaign_messages(campaign_id, subject, text_body, persona_id, total_recipients, status, scheduled_at)
+                    VALUES(${campaign.id}, ${subject}, ${p.text}, ${persona.id}, ${recipients.length}, 'scheduled', ${scheduledDate.toISOString()})
+                    RETURNING *
+                `;
+
+                // If scheduled within the next 26 hours (e.g. today), immediately enqueue to QStash
+                let qstashId = null;
+                if (process.env.QSTASH_TOKEN && (scheduledDate.getTime() - Date.now() <= 26 * 60 * 60 * 1000)) {
+                    try {
+                        const qstash = new QStashClient({ token: process.env.QSTASH_TOKEN });
+                        const appUrl = (process.env.APP_URL || 'http://localhost:3000').replace(/\/$/, '');
+                        const notBefore = Math.floor(scheduledDate.getTime() / 1000);
+                        const qRes = await qstash.publishJSON({
+                            url: `${appUrl}/api/campaigns/trigger-scheduled`,
+                            body: { campaignMessageId: campaignMsg.id },
+                            notBefore
+                        });
+                        qstashId = qRes.messageId;
+                        await sql`UPDATE campaign_messages SET qstash_message_id=${qstashId} WHERE id=${campaignMsg.id}`;
+                    } catch (e) {
+                        console.warn('QStash immediate queue failed (DailyScheduler will retry at 2am):', e.message);
+                    }
+                }
+
+                return json({
+                    ok: true,
+                    scheduled: true,
+                    campaignMessageId: campaignMsg.id,
+                    scheduledAt: scheduledDate.toISOString(),
+                    qstashMessageId: qstashId,
+                    total: recipients.length
+                });
             }
 
-            if (!platformPool.length) {
-                fail(`All platforms capable of sending for "${senderDomain}" have exhausted their daily sending quota for today. Please wait for quota reset or increase daily limits.`, 400);
+            // Immediate Send: check today's capacity
+            const availableToday = await getCapacityForDate(sql, new Date());
+            if (recipients.length > availableToday) {
+                fail(`Cannot send campaign: Recipient list has ${recipients.length} emails, but available daily capacity today is only ${availableToday}.`, 400);
             }
 
-            // 4. Create campaign_messages record
             const [campaignMsg] = await sql`
                 INSERT INTO campaign_messages(campaign_id, subject, text_body, persona_id, total_recipients, status)
                 VALUES(${campaign.id}, ${subject}, ${p.text}, ${persona.id}, ${recipients.length}, 'sending')
                 RETURNING *
             `;
 
-            const [inbound] = await sql`SELECT id FROM connections WHERE provider='cloudflare' AND enabled AND domains ? ${senderDomain}`;
-
-            let sentCount = 0;
-            let failedCount = 0;
-            let currentPoolIdx = 0;
-            let quotaHit = false;
-            let lastError = null;
-
-            for (const recipient of recipients) {
-                try {
-                    const sup = await messageStore('suppressed', { email: recipient });
-                    if (sup && sup.blocked) {
-                        failedCount++;
-                        continue;
-                    }
-                } catch {}
-
-                // Move to next platform if current platform has no remaining capacity
-                while (currentPoolIdx < platformPool.length && platformPool[currentPoolIdx].remaining <= 0) {
-                    currentPoolIdx++;
-                }
-
-                if (currentPoolIdx >= platformPool.length) {
-                    quotaHit = true;
-                    lastError = 'Daily quota limit reached across all available platforms';
-                    break;
-                }
-
-                const msgId = randomUUID();
-                const token = randomBytes(16).toString('hex');
-                const replyTo = inbound ? `reply+${token}@${senderDomain}` : persona.email;
-                const payload = { id: msgId, from: persona.email, fromName: persona.name, to: recipient, subject, text: p.text, html: '', replyTo, headers: {} };
-
-                let reservation = null;
-                let activePlatform = null;
-                let c = null;
-                let credentials = null;
-
-                // Try reservation; if current platform quota is exhausted, rollover to next platform!
-                while (currentPoolIdx < platformPool.length) {
-                    activePlatform = platformPool[currentPoolIdx];
-                    c = activePlatform.connection;
-                    credentials = activePlatform.credentials;
-
-                    try {
-                        const [res] = await sql`SELECT reserve_email(${c.id},${persona.id},${msgId},null,${recipient},${subject},${p.text},'',${JSON.stringify({})}::jsonb,${token},null) AS result`;
-                        reservation = res.result;
-                        break;
-                    } catch (e) {
-                        if (e.message && e.message.includes('Quota reached')) {
-                            activePlatform.remaining = 0;
-                            currentPoolIdx++;
-                            continue;
-                        }
-                        lastError = e.message;
-                        break;
-                    }
-                }
-
-                if (!reservation) {
-                    if (currentPoolIdx >= platformPool.length) {
-                        quotaHit = true;
-                        break;
-                    }
-                    failedCount++;
-                    continue;
-                }
-
-                if (reservation.duplicate) continue;
-
-                const reservationKeys = reservation.reservation || [];
-                try {
-                    await messageStore('insertOutbound', {
-                        message: {
-                            id: msgId,
-                            connection_id: c.id,
-                            persona_id: persona.id,
-                            thread_id: msgId,
-                            parent_id: null,
-                            from_email: persona.email,
-                            from_name: persona.name,
-                            to_email: recipient,
-                            subject,
-                            text_body: p.text,
-                            html_body: '',
-                            headers: {},
-                            message_id: null,
-                            reply_token: token,
-                            status: 'sending',
-                            reservation: reservationKeys
-                        }
-                    });
-                } catch (e) {
-                    await sql`SELECT finish_email(${msgId}, 'failed', null, null, ${e.message})`;
-                    failedCount++;
-                    lastError = e.message;
-                    continue;
-                }
-
-                try {
-                    const outcome = await sendEmail(c.provider, credentials, payload, c.settings);
-                    await sql`SELECT finish_email(${msgId}, 'accepted', ${outcome.providerId}, ${outcome.messageId}, null)`;
-                    await messageStore('updateMessage', { id: msgId, status: 'accepted', provider_id: outcome.providerId, message_id: outcome.messageId });
-                    sentCount++;
-                    activePlatform.remaining--;
-                    activePlatform.sentThisBatch++;
-                } catch (e) {
-                    const status = e.uncertain === false ? 'failed' : 'unknown';
-                    await sql`SELECT finish_email(${msgId}, ${status}, null, null, ${e.message})`;
-                    await messageStore('updateMessage', { id: msgId, status, error: e.message });
-                    if (status === 'failed') failedCount++;
-                    else {
-                        sentCount++;
-                        activePlatform.remaining--;
-                        activePlatform.sentThisBatch++;
-                    }
-                    lastError = e.message;
-                }
-            }
-
-            // Build platform breakdown stats
-            const platformStats = {};
-            for (const p of platformPool) {
-                if (p.sentThisBatch > 0) {
-                    platformStats[p.connection.label || p.connection.provider] = p.sentThisBatch;
-                }
-            }
-
-            let finalStatus = 'completed';
-            if (quotaHit) finalStatus = 'quota-stopped';
-            else if (failedCount > 0 && sentCount === 0) finalStatus = 'failed';
-            else if (failedCount > 0) finalStatus = 'partial';
-
-            await sql`
-                UPDATE campaign_messages
-                SET sent_count=${sentCount}, failed_count=${failedCount}, status=${finalStatus}, platform_stats=${JSON.stringify(platformStats)}::jsonb
-                WHERE id=${campaignMsg.id}
-            `;
-
-            return json({
-                ok: true,
-                campaignMessageId: campaignMsg.id,
-                sentCount,
-                failedCount,
-                total: recipients.length,
-                status: finalStatus,
-                platformStats,
-                error: lastError
-            });
+            const outcome = await dispatchCampaignMessage({ campaignMessageId: campaignMsg.id, sql });
+            return json({ ok: true, ...outcome });
         }
         fail('Not found', 404);
     } catch (e) {

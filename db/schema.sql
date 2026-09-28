@@ -98,5 +98,8 @@ CREATE TABLE IF NOT EXISTS campaign_messages (
  failed_count int NOT NULL DEFAULT 0,
  status text NOT NULL DEFAULT 'pending',
  platform_stats jsonb NOT NULL DEFAULT '{}',
+ scheduled_at timestamptz,
+ qstash_message_id text,
  created_at timestamptz NOT NULL DEFAULT now()
 );
+
