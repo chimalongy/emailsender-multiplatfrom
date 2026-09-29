@@ -100,6 +100,25 @@ CREATE TABLE IF NOT EXISTS campaign_messages (
  platform_stats jsonb NOT NULL DEFAULT '{}',
  scheduled_at timestamptz,
  qstash_message_id text,
+ parent_batch_id uuid REFERENCES campaign_messages(id) ON DELETE SET NULL,
+ is_follow_up boolean NOT NULL DEFAULT false,
  created_at timestamptz NOT NULL DEFAULT now()
 );
+
+CREATE TABLE IF NOT EXISTS campaign_deliveries (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ campaign_message_id uuid NOT NULL REFERENCES campaign_messages(id) ON DELETE CASCADE,
+ recipient text NOT NULL,
+ message_uuid uuid NOT NULL,
+ wire_message_id text,
+ thread_id text,
+ platform text,
+ status text NOT NULL,
+ error text,
+ created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_campaign_deliveries_batch ON campaign_deliveries(campaign_message_id);
+CREATE INDEX IF NOT EXISTS idx_campaign_deliveries_lookup ON campaign_deliveries(campaign_message_id, recipient);
+
 

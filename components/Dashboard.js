@@ -35,7 +35,8 @@ export default function Dashboard({initialTab='Overview'}){
  const [page,setPage]=useState(initialTab||pathToTab(pathname)||'Overview'),[connectedTab,setConnectedTab]=useState('capacity'),[data,setData]=useState({connections:[],personas:[],campaigns:[]}),[error,setError]=useState(''),[notice,setNotice]=useState(''),[busy,setBusy]=useState(false),[loading,setLoading]=useState(true);
  const [connection,setConnection]=useState(initialConnection('brevo')),[inspect,setInspect]=useState(null),[persona,setPersona]=useState({name:'',email:''});
  const [compose,setCompose]=useState({id:'',personaId:'',connectionId:'',to:'',subject:'',text:'',parentId:null}),[folder,setFolder]=useState('inbox'),[offset,setOffset]=useState(0),[messages,setMessages]=useState([]),[thread,setThread]=useState([]);
- const [selectedCampaignId,setSelectedCampaignId]=useState(null),[campaignForm,setCampaignForm]=useState({name:'',emails:''}),[campaignMsg,setCampaignMsg]=useState({personaId:'',subject:'',text:'',sendMode:'now',scheduledAt:''}),[editingRecipients,setEditingRecipients]=useState(false),[recipientEditText,setRecipientEditText]=useState('');
+ const [selectedCampaignId,setSelectedCampaignId]=useState(null),[campaignForm,setCampaignForm]=useState({name:'',emails:''}),[campaignMsg,setCampaignMsg]=useState({personaId:'',subject:'',text:'',sendMode:'now',scheduledAt:'',isFollowUp:false,parentBatchId:null}),[editingRecipients,setEditingRecipients]=useState(false),[recipientEditText,setRecipientEditText]=useState('');
+ const [batchDetailsModal,setBatchDetailsModal]=useState(null),[batchDetailsLoading,setBatchDetailsLoading]=useState(false),[batchDeliveryFilter,setBatchDeliveryFilter]=useState('all'),[batchDeliverySearch,setBatchDeliverySearch]=useState('');
  const [calMonth,setCalMonth]=useState(new Date().getMonth()+1);
  const [calYear,setCalYear]=useState(new Date().getFullYear());
  const [calData,setCalData]=useState(null);
@@ -94,7 +95,66 @@ export default function Dashboard({initialTab='Overview'}){
  async function createCampaign(e){e.preventDefault();const parsed=parseEmailList(campaignForm.emails);if(!parsed.length){setError('Please enter at least one valid recipient email address.');return;}if(parsed.length>availableDailyCapacity){setError(`Cannot create campaign: The recipient list contains ${parsed.length} emails, but the total available daily sending capacity across all active platforms is only ${availableDailyCapacity}. Please increase platform limits or reduce your recipient list.`);return;}await run(async()=>{const res=await api('campaigns',{name:campaignForm.name,recipients:parsed});await refresh();setCampaignForm({name:'',emails:''});setNotice(`Campaign "${campaignForm.name}" created with ${parsed.length} recipient${parsed.length===1?'':'s'}.`);if(res.campaign?.id){setSelectedCampaignId(res.campaign.id);setRecipientEditText((res.campaign.recipients||[]).join('\n'));}});}
  async function deleteCampaign(c){if(!confirm(`Delete campaign "${c.name}"? This will also remove its campaign message history.`))return;await run(async()=>{await api('campaigns',{action:'delete',id:c.id});if(selectedCampaignId===c.id)setSelectedCampaignId(null);await refresh();setNotice(`Campaign "${c.name}" deleted.`);});}
  async function saveRecipients(c){const parsed=parseEmailList(recipientEditText);if(!parsed.length){setError('Please enter at least one valid recipient email address.');return;}if(parsed.length>availableDailyCapacity){setError(`Cannot update campaign: Recipient list has ${parsed.length} emails, but available daily sending capacity across all active platforms is only ${availableDailyCapacity}.`);return;}await run(async()=>{await api('campaigns',{action:'update',id:c.id,recipients:parsed});await refresh();setEditingRecipients(false);setNotice(`Updated "${c.name}" with ${parsed.length} recipient${parsed.length===1?'':'s'}.`);});}
- async function sendCampaignBroadcast(e){e.preventDefault();if(!selectedCampaign||!selectedCampaign.recipients?.length){setError('No recipients found in this campaign.');return;}if(campaignMsg.sendMode==='schedule'&&!campaignMsg.scheduledAt){setError('Please select a scheduled date and time for this broadcast.');return;}await run(async()=>{const res=await api('campaigns/send',{campaignId:selectedCampaign.id,personaId:campaignMsg.personaId,subject:campaignMsg.subject,text:campaignMsg.text,scheduledAt:campaignMsg.sendMode==='schedule'?campaignMsg.scheduledAt:undefined});await refresh();if(res.scheduled){setNotice(`Broadcast successfully scheduled for ${new Date(res.scheduledAt).toLocaleString()}! QStash & DailyScheduler will dispatch via waterfall at the designated time.`);setCampaignMsg(prev=>({...prev,subject:'',text:'',sendMode:'now',scheduledAt:''}));}else{const statsStr=res.platformStats&&Object.keys(res.platformStats).length?' ('+Object.entries(res.platformStats).map(([k,v])=>`${v} via ${k}`).join(', ')+')':'';if(res.status==='completed'){setNotice(`Broadcast successfully delivered to all ${res.sentCount} recipient${res.sentCount===1?'':'s'}!${statsStr}`);setCampaignMsg(prev=>({...prev,subject:'',text:''}));}else if(res.status==='quota-stopped'){setNotice(`Sending paused: Daily capacity reached across available platforms. ${res.sentCount} sent, ${res.total-res.sentCount} remaining.${statsStr} ${res.error||''}`);}else if(res.status==='partial'){setNotice(`Broadcast finished with issues: ${res.sentCount} sent, ${res.failedCount} failed.${statsStr} ${res.error||''}`);}else{setNotice(`Broadcast status: ${res.status}.${statsStr} ${res.error||''}`);}}});}
+ async function sendCampaignBroadcast(e){
+  e.preventDefault();
+  if(!selectedCampaign||!selectedCampaign.recipients?.length){setError('No recipients found in this campaign.');return;}
+  if(campaignMsg.sendMode==='schedule'&&!campaignMsg.scheduledAt){setError('Please select a scheduled date and time for this broadcast.');return;}
+  await run(async()=>{
+   const res=await api('campaigns/send',{
+    campaignId:selectedCampaign.id,
+    personaId:campaignMsg.personaId,
+    subject:campaignMsg.subject,
+    text:campaignMsg.text,
+    scheduledAt:campaignMsg.sendMode==='schedule'?campaignMsg.scheduledAt:undefined,
+    isFollowUp:campaignMsg.isFollowUp,
+    parentBatchId:campaignMsg.parentBatchId
+   });
+   await refresh();
+   if(res.scheduled){
+    setNotice(`Broadcast successfully scheduled for ${new Date(res.scheduledAt).toLocaleString()}! QStash & DailyScheduler will dispatch via waterfall at the designated time.`);
+    setCampaignMsg(prev=>({...prev,subject:'',text:'',sendMode:'now',scheduledAt:'',isFollowUp:false,parentBatchId:null}));
+   }else{
+    const statsStr=res.platformStats&&Object.keys(res.platformStats).length?' ('+Object.entries(res.platformStats).map(([k,v])=>`${v} via ${k}`).join(', ')+')':'';
+    if(res.status==='completed'){
+     setNotice(`${campaignMsg.isFollowUp?'Follow-up broadcast':'Broadcast'} successfully delivered to all ${res.sentCount} recipient${res.sentCount===1?'':'s'}!${statsStr}`);
+     setCampaignMsg(prev=>({...prev,subject:'',text:'',isFollowUp:false,parentBatchId:null}));
+    }else if(res.status==='quota-stopped'){
+     setNotice(`Sending paused: Daily capacity reached across available platforms. ${res.sentCount} sent, ${res.total-res.sentCount} remaining.${statsStr} ${res.error||''}`);
+    }else if(res.status==='partial'){
+     setNotice(`Broadcast finished with issues: ${res.sentCount} sent, ${res.failedCount} failed.${statsStr} ${res.error||''}`);
+    }else{
+     setNotice(`Broadcast status: ${res.status}.${statsStr} ${res.error||''}`);
+    }
+   }
+  });
+ }
+ async function openBatchDetails(batchId){
+  setBatchDetailsLoading(true);
+  setBatchDetailsModal(null);
+  setBatchDeliveryFilter('all');
+  setBatchDeliverySearch('');
+  try{
+   const res=await api(`campaigns/batch-details?id=${batchId}`);
+   setBatchDetailsModal(res);
+  }catch(e){
+   setError(e.message);
+  }finally{
+   setBatchDetailsLoading(false);
+  }
+ }
+ function startFollowUp(m){
+  const orig=m.subject||'';
+  const followSub=/^re:\s*/i.test(orig)?orig:`Re: ${orig}`;
+  setCampaignMsg(prev=>({
+   ...prev,
+   isFollowUp:true,
+   parentBatchId:m.id,
+   personaId:m.persona_id||prev.personaId,
+   subject:followSub,
+   text:''
+  }));
+  setNotice(`Follow-up mode set for Batch "${m.subject}". Subsequent emails will thread into each recipient's original message.`);
+ }
   function navigate(p){setPage(p);setMobileMenuOpen(false);setError('');setNotice('');if(p==='Compose'&&!compose.id)setCompose(c=>({...c,id:crypto.randomUUID()}));if(p==='Campaigns')setSelectedCampaignId(null);if(p==='Schedules')setSelectedCalDay(null);const targetPath=tabToPath[p]||'/';if(pathname!==targetPath)router.push(targetPath);}
   return <div className="shell">
    {mobileMenuOpen&&<div className="mobile-overlay" onClick={()=>setMobileMenuOpen(false)}/>}
@@ -133,8 +193,21 @@ export default function Dashboard({initialTab='Overview'}){
     </div>
     <div className="columns">
      <form className="card form composer" onSubmit={sendCampaignBroadcast}>
-      <h3 style={{fontSize:'18px',marginBottom:'4px'}}>Send a message to this campaign</h3>
-      <p className="muted" style={{marginBottom:'16px'}}>A personalized individual copy will be sent to every recipient in this campaign.</p>
+      {campaignMsg.isFollowUp&&(
+       <div style={{background:'#eff6ff',border:'1px solid #bfdbfe',borderRadius:'8px',padding:'12px 14px',marginBottom:'16px',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+        <div>
+         <strong style={{color:'#1e40af',fontSize:'12px',letterSpacing:'0.4px',display:'block'}}>FOLLOW-UP THREADING ENABLED</strong>
+         <span style={{color:'#1e3a8a',fontSize:'12px'}}>
+          This broadcast will be sent directly in the same conversation thread as Batch &quot;{selectedCampaign.messages?.find(m=>m.id===campaignMsg.parentBatchId)?.subject || 'Previous Batch'}&quot;.
+         </span>
+        </div>
+        <button type="button" className="secondary" style={{padding:'4px 10px',fontSize:'11px'}} onClick={()=>setCampaignMsg(prev=>({...prev,isFollowUp:false,parentBatchId:null,subject:''}))}>
+         ✕ Cancel Follow-up
+        </button>
+       </div>
+      )}
+      <h3 style={{fontSize:'18px',marginBottom:'4px'}}>{campaignMsg.isFollowUp ? 'Send a follow-up batch' : 'Send a message to this campaign'}</h3>
+      <p className="muted" style={{marginBottom:'16px'}}>{campaignMsg.isFollowUp ? 'Follow-up emails will be delivered in the same thread as your previous email.' : 'A personalized individual copy will be sent to every recipient in this campaign.'}</p>
       <label>Sender persona
        <select required value={campaignMsg.personaId} onChange={e=>setCampaignMsg({...campaignMsg,personaId:e.target.value})}>
         <option value="">Choose a persona to send as</option>
@@ -206,13 +279,13 @@ export default function Dashboard({initialTab='Overview'}){
        )}
       </div>
       <div className="composerfoot">
-       <button type="button" className="secondary" disabled={busy} onClick={()=>setCampaignMsg(prev=>({...prev,subject:'',text:'',sendMode:'now',scheduledAt:''}))}>Clear</button>
-       <p className="muted">Dispatched individually · Deduplicated · Tracked</p>
-       <button disabled={busy||!selectedCampaign.recipients?.length||(campaignMsg.sendMode==='schedule'&&!campaignMsg.scheduledAt)}>
-        {busy ? (campaignMsg.sendMode==='schedule'?'Scheduling…':'Broadcasting…') : (campaignMsg.sendMode==='schedule'?`Schedule for ${selectedCampaign.recipients?.length||0} recipients ⏱`:`Send to all ${selectedCampaign.recipients?.length||0} recipients ↗`)}
-       </button>
-      </div>
-     </form>
+        <button type="button" className="secondary" disabled={busy} onClick={()=>setCampaignMsg(prev=>({...prev,subject:'',text:'',sendMode:'now',scheduledAt:'',isFollowUp:false,parentBatchId:null}))}>Clear</button>
+        <p className="muted">Dispatched individually · Deduplicated · Tracked</p>
+        <button disabled={busy||!selectedCampaign.recipients?.length||(campaignMsg.sendMode==='schedule'&&!campaignMsg.scheduledAt)}>
+         {busy ? (campaignMsg.sendMode==='schedule'?'Scheduling…':'Broadcasting…') : (campaignMsg.sendMode==='schedule'?`Schedule for ${selectedCampaign.recipients?.length||0} recipients ⏱`:(campaignMsg.isFollowUp?`Send Follow-up to ${selectedCampaign.recipients?.length||0} recipients ↩`:`Send to all ${selectedCampaign.recipients?.length||0} recipients ↗`))}
+        </button>
+       </div>
+      </form>
      <div style={{display:'flex',flexDirection:'column',gap:'20px'}}>
       <div className="card">
        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'12px'}}>
@@ -242,18 +315,25 @@ export default function Dashboard({initialTab='Overview'}){
        )}
       </div>
       <div className="card">
-       <h3 style={{marginBottom:'4px'}}>Messages sent to this campaign</h3>
-       <p className="muted" style={{fontSize:'12px',margin:'0 0 12px'}}>{(selectedCampaign.messages||[]).length} broadcast{(selectedCampaign.messages?.length===1)?'':'s'} dispatched</p>
+       <h3 style={{marginBottom:'4px'}}>Campaign Batches & Dispatches</h3>
+       <p className="muted" style={{fontSize:'12px',margin:'0 0 12px'}}>{(selectedCampaign.messages||[]).length} batch{(selectedCampaign.messages?.length===1)?'':'es'} dispatched</p>
        {!(selectedCampaign.messages||[]).length?(
-        <p className="muted" style={{fontSize:'13px',margin:0}}>No messages sent yet. Use the composer on the left to send your first message to this campaign.</p>
+        <p className="muted" style={{fontSize:'13px',margin:0}}>No batches sent yet. Use the composer on the left to send your first message to this campaign.</p>
        ):(
-        <div style={{display:'grid',gap:'10px',maxHeight:'320px',overflowY:'auto'}}>
-         {selectedCampaign.messages.map(m=>{
+        <div style={{display:'grid',gap:'12px',maxHeight:'380px',overflowY:'auto'}}>
+         {selectedCampaign.messages.map((m,idx)=>{
+          const batchNumber = selectedCampaign.messages.length - idx;
           const stats = m.platform_stats && typeof m.platform_stats === 'object' && Object.keys(m.platform_stats).length > 0 ? m.platform_stats : null;
           return (
-           <div key={m.id} style={{padding:'12px',background:'var(--bg)',borderRadius:'8px',border:'1px solid var(--line)'}}>
-            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:'8px'}}>
-             <b style={{fontSize:'13px'}}>{m.subject}</b>
+           <div key={m.id} style={{padding:'13px 15px',background:'var(--bg)',borderRadius:'8px',border:'1px solid var(--line)'}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:'8px'}}>
+             <div>
+              <div style={{display:'flex',alignItems:'center',gap:'6px',flexWrap:'wrap',marginBottom:'4px'}}>
+               <span className="badge" style={{fontWeight:'700',fontSize:'10px'}}>Batch #{batchNumber}</span>
+               {m.is_follow_up && <span className="badge" style={{background:'#dbeafe',color:'#1e40af',fontSize:'10px'}}>↳ Follow-up</span>}
+               <b style={{fontSize:'13px'}}>{m.subject}</b>
+              </div>
+             </div>
              <div style={{display:'flex',gap:'6px',alignItems:'center'}}>
               <span className={'badge '+(m.status==='completed'?'green':m.status==='scheduled'?'':m.status==='quota-stopped'?'':m.status==='failed'?'danger':'')}>{m.status}</span>
               {m.status==='scheduled'&&<button type="button" className="link danger" style={{fontSize:'11px'}} onClick={()=>cancelScheduledBroadcast(m.id)}>Cancel</button>}
@@ -273,6 +353,16 @@ export default function Dashboard({initialTab='Overview'}){
              </div>
             )}
             {m.text_body&&<p style={{fontSize:'12px',color:'var(--muted)',margin:'8px 0 0',maxHeight:'38px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{m.text_body}</p>}
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginTop:'12px',paddingTop:'10px',borderTop:'1px dashed var(--line)',flexWrap:'wrap',gap:'8px'}}>
+             <button type="button" className="secondary" style={{padding:'5px 11px',fontSize:'11px'}} onClick={()=>openBatchDetails(m.id)}>
+              📊 View Batch Details
+             </button>
+             {m.status!=='scheduled'&&(
+              <button type="button" className="secondary" style={{padding:'5px 11px',fontSize:'11px',color:'var(--green)'}} onClick={()=>startFollowUp(m)}>
+               ↩ Send Follow-up
+              </button>
+             )}
+            </div>
            </div>
           );
          })}
@@ -557,6 +647,111 @@ export default function Dashboard({initialTab='Overview'}){
  {page==='Compose'&&<form className="card form composer" onSubmit={e=>{e.preventDefault();run(async()=>{const id=compose.id||crypto.randomUUID();setCompose(c=>({...c,id}));const r=await api('send',{...compose,id});await refresh();if(r.status==='accepted'){setNotice('Accepted by the provider. Saved in Sent.');setCompose(c=>({...c,id:crypto.randomUUID(),text:'',subject:'',parentId:null}));}else {setCompose(c=>({...c,id:crypto.randomUUID()}));setNotice(`Status: ${r.status}. ${r.status==='failed'?'Correct the provider issue before retrying.':'Check Sent and provider logs before trying again.'} ${r.error||''}`);}});}}><div className="row"><label>Sender persona<select required value={compose.personaId} onChange={e=>setCompose({...compose,personaId:e.target.value})}><option value="">Choose a persona</option>{data.personas.map(p=><option value={p.id} key={p.id}>{p.name} — {p.email}</option>)}</select></label><label>Sending platform<select required value={compose.connectionId} onChange={e=>setCompose({...compose,connectionId:e.target.value})}><option value="">Choose a platform</option>{senders.map(c=><option key={c.id} value={c.id} disabled={!c.enabled||!!selectedPersona&&!c.domains.includes(selectedPersona.email.split('@')[1])}>{c.label}{!c.enabled?' — paused':selectedPersona&&!c.domains.includes(selectedPersona.email.split('@')[1])?' — verify domain':''}</option>)}</select></label></div>{['gosend','sequenzy'].includes(senders.find(c=>c.id===compose.connectionId)?.provider)&&<div className="hint">This platform does not document custom threading headers. Your app can retain the reply relationship, but the recipient’s mail client may show a separate conversation. GoSend also lacks documented custom Reply-To support.</div>}<label>To<input type="email" required value={compose.to} onChange={e=>setCompose({...compose,to:e.target.value})} placeholder="recipient@example.com"/></label><label>Subject<input required maxLength="255" value={compose.subject} onChange={e=>setCompose({...compose,subject:e.target.value})} placeholder="What would you like to say?"/></label><label>Message<textarea required rows="14" maxLength="100000" value={compose.text} onChange={e=>setCompose({...compose,text:e.target.value})} placeholder="Write your message…"/></label><div className="composerfoot"><button type="button" className="secondary" disabled={busy} onClick={()=>setCompose(c=>({...c,id:crypto.randomUUID(),to:'',subject:'',text:'',parentId:null}))}>New message</button><p className="muted">One recipient per send · Saved to Sent automatically</p><button disabled={busy}>{busy?'Sending…':'Send email ↗'}</button></div></form>}
  {page==='Mailbox'&&<><div className="sectiontitle"><div className="tabs">{['inbox','sent'].map(f=><button className={folder===f?'selected':''} key={f} onClick={()=>{setFolder(f);setOffset(0);setThread([]);}}>{f==='inbox'?'Inbox':'Sent'}</button>)}</div><button className="secondary" onClick={()=>run(async()=>setMessages(await api(`messages?folder=${folder}&offset=${offset}`)))}>Refresh</button></div><div className="mailcolumns"><section className="card maillist">{messages.map(m=><button key={m.id} onClick={()=>openThread(m.thread_id)} className="mailrow"><div><b>{folder==='sent'?m.to_email:m.from_email}</b><time>{new Date(m.created_at).toLocaleDateString()}</time></div><p>{m.subject}</p><span className="badge">{m.status}</span></button>)}{!messages.length&&<div className="empty"><h3>No messages here yet.</h3><p>Incoming and outgoing messages will appear here.</p></div>}<div className="row pager"><button className="secondary" disabled={!offset} onClick={()=>setOffset(Math.max(0,offset-50))}>Previous</button><button className="secondary" disabled={messages.length<50} onClick={()=>setOffset(offset+50)}>Next</button></div></section><section>{!thread.length?<div className="empty card"><div className="emptyicon">▤</div><h2>Select a conversation</h2><p>Read messages and send replies from any platform.</p></div>:thread.map(m=><article className="card message" key={m.id}><div className="cardtitle"><h3>{m.subject}</h3><span className="badge">{m.status}</span></div><p><b>{m.from_name||m.from_email}</b> → {m.to_email}</p><small>{fmt(m.created_at)}</small>{m.text_body?<div className="messagebody">{m.text_body}</div>:<iframe title="Email content" sandbox="" referrerPolicy="no-referrer" srcDoc={'<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'unsafe-inline\'"><style>body{font:15px system-ui;line-height:1.6}</style>'+m.html_body}/>} {!!m.headers?.attachmentsOmitted&&<p className="hint">{m.headers.attachmentsOmitted} attachment(s) omitted in this text-only version.</p>}{m.error&&<p className="error">{m.error}</p>}<div className="row">{m.direction==='in'&&<button onClick={()=>reply(m)}>Reply ↗</button>}<details><summary>Message details</summary><p className="mono">ID: {m.id}</p><p className="mono">Wire Message-ID: {m.message_id||'Not provided by API'}</p><p className="mono">Provider ID: {m.provider_id||'—'}</p>{m.direction==='in'&&<form onSubmit={e=>{e.preventDefault();const target=new FormData(e.target).get('target');run(async()=>{await api('link',{id:m.id,target});setThread([]);setNotice('Message linked to the selected conversation.');});}}><label>Link to outgoing message ID<input name="target" required placeholder="Paste the outgoing message UUID"/></label><button disabled={busy} className="secondary">Link conversation</button></form>}{['sending','unknown'].includes(m.status)&&<form onSubmit={e=>{e.preventDefault();const values=Object.fromEntries(new FormData(e.target));run(async()=>{await api('reconcile',{id:m.id,...values});setThread(await api('messages?thread='+m.thread_id));await refresh();});}}><p>First verify the outcome in your provider logs. Confirmed failures release reserved capacity.</p><select name="status"><option value="accepted">Provider accepted it</option><option value="failed">Provider confirms it was not sent</option></select><label>Provider ID<input name="providerId"/></label><label>Wire Message-ID (if known)<input name="messageId"/></label><button disabled={busy}>Save confirmed outcome</button></form>}</details></div></article>)}</section></div></>}
  {page==='Deployment'&&<section className="card form deployment"><p className="eyebrow">SERVERLESS SETUP</p><h2>From project to inbox.</h2><ol><li><b>Create Neon and D1.</b><p>Run <code>db/schema.sql</code> in Neon. Create a D1 database and run <code>db/d1-messages.sql</code> remotely. Message rows are stored in D1; other application data remains in Neon.</p></li><li><b>Deploy the Worker.</b><p>Set your D1 database ID in <code>worker/wrangler.jsonc</code>, deploy the Worker and save INBOUND_SECRET with Wrangler. The Worker handles incoming mail and serves the signed D1 API.</p></li><li><b>Deploy on Vercel.</b><p>Set DATABASE_URL, MESSAGE_STORE_URL (Worker URL plus <code>/api/messages</code>), APP_URL, ADMIN_PASSWORD_HASH, SESSION_SECRET, CREDENTIALS_KEY and INBOUND_SECRET. The secret must match the Worker. Redeploy after setting variables.</p></li><li><b>Connect providers and routes.</b><p>Publish provider DNS records. Keep Cloudflare's receiving MX records. Route persona addresses and a catch-all for <code>reply+…</code> addresses to the deployed Worker. Add and enable the domain in Connections.</p></li><li><b>Test the round trip.</b><p>Send to an address you control, reply, then open Inbox. Configure optional Resend/Mailgun delivery webhooks and save their signing secrets.</p></li></ol><div className="hint">Message bodies and status live in D1. Attachments are not retained in this text/HTML version. Read README.md and docs/CLOUDFLARE.md for deployment steps.</div><details><summary>View complete Worker code</summary><WorkerCode/></details></section>}
+
+  {batchDetailsLoading && (
+   <div className="modal-overlay">
+    <div className="modal-dialog" style={{maxWidth:'400px',padding:'30px',textAlign:'center'}}>
+     <p className="muted">Loading batch delivery details…</p>
+    </div>
+   </div>
+  )}
+  {batchDetailsModal && (
+   <div className="modal-overlay" onClick={()=>setBatchDetailsModal(null)}>
+    <div className="modal-dialog" onClick={e=>e.stopPropagation()}>
+     <div className="modal-header">
+      <div>
+       <div style={{display:'flex',alignItems:'center',gap:'8px'}}>
+        <h2 style={{fontSize:'17px',margin:0}}>Batch Delivery Details</h2>
+        {batchDetailsModal.batch?.is_follow_up && <span className="badge" style={{background:'#dbeafe',color:'#1e40af'}}>↳ Follow-up</span>}
+        <span className={'badge '+(batchDetailsModal.batch?.status==='completed'?'green':batchDetailsModal.batch?.status==='failed'?'danger':'')}>{batchDetailsModal.batch?.status}</span>
+       </div>
+       <p className="muted" style={{fontSize:'12px',margin:'4px 0 0'}}>
+        Subject: <b>{batchDetailsModal.batch?.subject}</b> · Sent: {fmt(batchDetailsModal.batch?.created_at)}
+       </p>
+      </div>
+      <button type="button" className="secondary" style={{padding:'6px 12px',fontSize:'13px'}} onClick={()=>setBatchDetailsModal(null)}>✕ Close</button>
+     </div>
+     <div className="modal-body">
+      <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'12px',marginBottom:'18px'}}>
+       <div style={{background:'var(--bg)',padding:'12px',borderRadius:'8px'}}>
+        <span className="muted" style={{fontSize:'11px',textTransform:'uppercase'}}>Total Recipients</span>
+        <strong style={{display:'block',fontSize:'20px',marginTop:'4px'}}>{batchDetailsModal.batch?.total_recipients||0}</strong>
+       </div>
+       <div style={{background:'var(--bg)',padding:'12px',borderRadius:'8px'}}>
+        <span className="muted" style={{fontSize:'11px',textTransform:'uppercase'}}>Delivered (Accepted)</span>
+        <strong style={{display:'block',fontSize:'20px',marginTop:'4px',color:'var(--green)'}}>{batchDetailsModal.batch?.sent_count||0}</strong>
+       </div>
+       <div style={{background:'var(--bg)',padding:'12px',borderRadius:'8px'}}>
+        <span className="muted" style={{fontSize:'11px',textTransform:'uppercase'}}>Failed / Suppressed</span>
+        <strong style={{display:'block',fontSize:'20px',marginTop:'4px',color:'#a64038'}}>{batchDetailsModal.batch?.failed_count||0}</strong>
+       </div>
+      </div>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:'10px',flexWrap:'wrap',marginBottom:'12px'}}>
+       <div style={{display:'flex',gap:'6px'}}>
+        {['all','accepted','failed','suppressed'].map(f=>{
+         const count = f==='all' ? (batchDetailsModal.deliveries||[]).length : (batchDetailsModal.deliveries||[]).filter(d=>d.status===f).length;
+         return (
+          <button key={f} type="button" className={batchDeliveryFilter===f?'':'secondary'} style={{padding:'5px 10px',fontSize:'11px',textTransform:'capitalize'}} onClick={()=>setBatchDeliveryFilter(f)}>
+           {f} ({count})
+          </button>
+         );
+        })}
+       </div>
+       <input
+        type="search"
+        placeholder="Filter by email address…"
+        value={batchDeliverySearch}
+        onChange={e=>setBatchDeliverySearch(e.target.value)}
+        style={{width:'220px',padding:'6px 10px',fontSize:'12px'}}
+       />
+      </div>
+      {!(batchDetailsModal.deliveries||[]).length ? (
+       <div className="empty card" style={{padding:'30px'}}>
+        <p className="muted" style={{margin:0}}>No per-recipient delivery logs recorded for this batch yet.</p>
+       </div>
+      ) : (
+       <div style={{overflowX:'auto',maxHeight:'380px'}}>
+        <table className="delivery-table">
+         <thead>
+          <tr>
+           <th>Recipient</th>
+           <th>Status</th>
+           <th>Platform</th>
+           <th>Details / Error</th>
+           <th>Timestamp</th>
+          </tr>
+         </thead>
+         <tbody>
+          {(batchDetailsModal.deliveries||[])
+           .filter(d => batchDeliveryFilter==='all' || d.status===batchDeliveryFilter)
+           .filter(d => !batchDeliverySearch || d.recipient.toLowerCase().includes(batchDeliverySearch.toLowerCase()))
+           .map(d => (
+            <tr key={d.id}>
+             <td><b>{d.recipient}</b></td>
+             <td>
+              <span className={'badge '+(d.status==='accepted'?'green':d.status==='failed'?'danger':d.status==='suppressed'?'warning':'')}>
+               {d.status==='accepted'?'✓ Delivered':d.status==='failed'?'✕ Failed':d.status}
+              </span>
+             </td>
+             <td><span className="badge" style={{background:'#fff',border:'1px solid var(--line)'}}>{d.platform || '—'}</span></td>
+             <td style={{fontSize:'11px',color:d.error?'#a64038':'var(--muted)',maxWidth:'280px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+              {d.error ? d.error : (d.wire_message_id ? `ID: ${d.wire_message_id}` : 'Accepted by provider')}
+             </td>
+             <td style={{fontSize:'11px',color:'var(--muted)',whiteSpace:'nowrap'}}>{fmt(d.created_at)}</td>
+            </tr>
+           ))}
+         </tbody>
+        </table>
+       </div>
+      )}
+     </div>
+     <div className="modal-footer">
+      <button type="button" className="secondary" onClick={()=>setBatchDetailsModal(null)}>Close</button>
+     </div>
+    </div>
+   </div>
+  )}
+
  <footer>EmailSender <span>One workspace. Every persona.</span></footer></main></div>;
 }
 function WorkerCode(){return <pre className="code">Open worker/worker.js in the project repository to view the full Cloudflare Worker script.</pre>;}

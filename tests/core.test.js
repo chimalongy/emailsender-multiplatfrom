@@ -47,11 +47,31 @@ test('Neon quota reservations, failures, retries and billing cycles (messages st
  await pg.query(`INSERT INTO campaigns(id,name,recipients) VALUES($1,'Beta Users','["alice@example.com","bob@example.com"]')`,[campId]);
  const msgId = randomUUID();
  await pg.query(`INSERT INTO campaign_messages(id,campaign_id,subject,text_body,total_recipients,status) VALUES($1,$2,'Welcome','Hello all',2,'completed')`,[msgId,campId]);
+ const deliv1 = randomUUID(), deliv2 = randomUUID();
+ await pg.query(`INSERT INTO campaign_deliveries(id,campaign_message_id,recipient,message_uuid,wire_message_id,thread_id,platform,status) VALUES($1,$2,'alice@example.com',$3,'<wire-1>','thread-1','Resend','accepted')`,[deliv1,msgId,randomUUID()]);
+ await pg.query(`INSERT INTO campaign_deliveries(id,campaign_message_id,recipient,message_uuid,thread_id,platform,status,error) VALUES($1,$2,'bob@example.com',$3,'thread-2','Brevo','failed','Invalid recipient')`,[deliv2,msgId,randomUUID()]);
+
+ // Follow-up batch
+ const followUpId = randomUUID();
+ await pg.query(`INSERT INTO campaign_messages(id,campaign_id,subject,text_body,total_recipients,status,is_follow_up,parent_batch_id) VALUES($1,$2,'Re: Welcome','Just checking in',2,'completed',true,$3)`,[followUpId,campId,msgId]);
+ const followUpBatch = (await pg.query('SELECT * FROM campaign_messages WHERE id=$1',[followUpId])).rows[0];
+ assert.equal(followUpBatch.is_follow_up, true);
+ assert.equal(followUpBatch.parent_batch_id, msgId);
+
+ const batchDeliveries = (await pg.query('SELECT * FROM campaign_deliveries WHERE campaign_message_id=$1 ORDER BY recipient',[msgId])).rows;
+ assert.equal(batchDeliveries.length, 2);
+ assert.equal(batchDeliveries[0].recipient, 'alice@example.com');
+ assert.equal(batchDeliveries[0].status, 'accepted');
+ assert.equal(batchDeliveries[1].recipient, 'bob@example.com');
+ assert.equal(batchDeliveries[1].status, 'failed');
+
  assert.equal((await pg.query('SELECT count(*) AS n FROM campaigns WHERE id=$1',[campId])).rows[0].n,1);
- assert.equal((await pg.query('SELECT count(*) AS n FROM campaign_messages WHERE campaign_id=$1',[campId])).rows[0].n,1);
+ assert.equal((await pg.query('SELECT count(*) AS n FROM campaign_messages WHERE campaign_id=$1',[campId])).rows[0].n,2);
+ assert.equal((await pg.query('SELECT count(*) AS n FROM campaign_deliveries WHERE campaign_message_id=$1',[msgId])).rows[0].n,2);
  await pg.query('DELETE FROM campaigns WHERE id=$1',[campId]);
  assert.equal((await pg.query('SELECT count(*) AS n FROM campaigns WHERE id=$1',[campId])).rows[0].n,0);
  assert.equal((await pg.query('SELECT count(*) AS n FROM campaign_messages WHERE campaign_id=$1',[campId])).rows[0].n,0);
+ assert.equal((await pg.query('SELECT count(*) AS n FROM campaign_deliveries WHERE campaign_message_id=$1',[msgId])).rows[0].n,0);
 
  await pg.close();
 });

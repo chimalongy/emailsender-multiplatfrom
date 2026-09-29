@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { randomBytes, randomUUID, createHash, createHmac } from 'node:crypto';
 import sanitizeHtml from 'sanitize-html';
-import { db } from '../../../lib/db.js';
+import { db, ensureCampaignTables } from '../../../lib/db.js';
 import { decrypt, encrypt, equal, passwordOK, session, validSession } from '../../../lib/security.js';
 import { providers } from '../../../lib/catalog.js';
 import { buildRequest, inspectDomain, sendEmail } from '../../../lib/providers.js';
@@ -17,38 +17,7 @@ const json = (v, status = 200) => NextResponse.json(v, { status });
 const clean = html => sanitizeHtml(html || '', { allowedTags: ['p','br','b','strong','em','i','ul','ol','li','blockquote','pre','h1','h2','h3','table','tbody','tr','td','th','a','hr'], allowedAttributes: { a: ['href','title'] }, allowedSchemes: ['https','http','mailto'] });
 async function readBody(req, max = 400000) { const reader = req.body?.getReader(); if (!reader) return ''; let size = 0; const chunks = []; for (; ;) { const { done, value } = await reader.read(); if (done) break; size += value.length; if (size > max) { await reader.cancel(); fail('Message too large', 413); } chunks.push(Buffer.from(value)); } return Buffer.concat(chunks).toString('utf8'); }
 async function authenticated(req) { if (!validSession((await cookies()).get('session')?.value)) fail('Sign in required', 401); }
-let campaignTablesChecked = false;
-async function ensureCampaignTables(sql) {
-    if (campaignTablesChecked) return;
-    await sql`
-        CREATE TABLE IF NOT EXISTS campaigns (
-            id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-            name text NOT NULL,
-            recipients jsonb NOT NULL DEFAULT '[]',
-            created_at timestamptz NOT NULL DEFAULT now()
-        );
-    `;
-    await sql`
-        CREATE TABLE IF NOT EXISTS campaign_messages (
-            id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-            campaign_id uuid NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
-            subject text NOT NULL,
-            text_body text NOT NULL,
-            persona_id uuid,
-            connection_id uuid,
-            total_recipients int NOT NULL DEFAULT 0,
-            sent_count int NOT NULL DEFAULT 0,
-            failed_count int NOT NULL DEFAULT 0,
-            status text NOT NULL DEFAULT 'pending',
-            platform_stats jsonb NOT NULL DEFAULT '{}',
-            created_at timestamptz NOT NULL DEFAULT now()
-        );
-    `;
-    await sql`ALTER TABLE campaign_messages ADD COLUMN IF NOT EXISTS platform_stats jsonb NOT NULL DEFAULT '{}';`;
-    await sql`ALTER TABLE campaign_messages ADD COLUMN IF NOT EXISTS scheduled_at timestamptz;`;
-    await sql`ALTER TABLE campaign_messages ADD COLUMN IF NOT EXISTS qstash_message_id text;`;
-    campaignTablesChecked = true;
-}
+
 async function getCapacityForDate(sql, dateObj) {
     const connections = await sql`SELECT id, provider, daily_limit FROM connections WHERE provider<>'cloudflare' AND enabled=true`;
     if (!connections.length) return 0;
@@ -200,6 +169,27 @@ async function handler(req, { params }) {
 
         await authenticated(req);
         if (req.method === 'GET' && path === 'state') return json(await state());
+        if (req.method === 'GET' && path === 'campaigns/batch-details') {
+            const sql = db();
+            await ensureCampaignTables(sql);
+            const url = new URL(req.url);
+            const batchId = uuid(url.searchParams.get('id'));
+            const [batch] = await sql`
+                SELECT cm.*, c.name as campaign_name, p.name as persona_name, p.email as persona_email
+                FROM campaign_messages cm
+                JOIN campaigns c ON c.id = cm.campaign_id
+                LEFT JOIN personas p ON p.id = cm.persona_id
+                WHERE cm.id = ${batchId}
+            `;
+            if (!batch) fail('Batch not found', 404);
+            const deliveries = await sql`
+                SELECT id, recipient, platform, status, error, wire_message_id, thread_id, created_at
+                FROM campaign_deliveries
+                WHERE campaign_message_id = ${batchId}
+                ORDER BY created_at ASC
+            `;
+            return json({ batch, deliveries });
+        }
         if (req.method === 'GET' && path === 'campaigns/calendar') {
             const sql = db();
             await ensureCampaignTables(sql);
@@ -425,6 +415,10 @@ async function handler(req, { params }) {
             const [persona] = await sql`SELECT * FROM personas WHERE id=${uuid(p.personaId)}`;
             if (!persona) fail('Choose a sender persona', 400);
 
+            const isFollowUp = !!p.isFollowUp;
+            const parentBatchId = p.parentBatchId ? uuid(p.parentBatchId) : null;
+            if (isFollowUp && !parentBatchId) fail('Follow-up broadcast requires a parent batch ID', 400);
+
             // Is this a scheduled broadcast?
             if (p.scheduledAt) {
                 const scheduledDate = new Date(p.scheduledAt);
@@ -437,8 +431,8 @@ async function handler(req, { params }) {
                 }
 
                 const [campaignMsg] = await sql`
-                    INSERT INTO campaign_messages(campaign_id, subject, text_body, persona_id, total_recipients, status, scheduled_at)
-                    VALUES(${campaign.id}, ${subject}, ${p.text}, ${persona.id}, ${recipients.length}, 'scheduled', ${scheduledDate.toISOString()})
+                    INSERT INTO campaign_messages(campaign_id, subject, text_body, persona_id, total_recipients, status, scheduled_at, is_follow_up, parent_batch_id)
+                    VALUES(${campaign.id}, ${subject}, ${p.text}, ${persona.id}, ${recipients.length}, 'scheduled', ${scheduledDate.toISOString()}, ${isFollowUp}, ${parentBatchId})
                     RETURNING *
                 `;
 
@@ -478,8 +472,8 @@ async function handler(req, { params }) {
             }
 
             const [campaignMsg] = await sql`
-                INSERT INTO campaign_messages(campaign_id, subject, text_body, persona_id, total_recipients, status)
-                VALUES(${campaign.id}, ${subject}, ${p.text}, ${persona.id}, ${recipients.length}, 'sending')
+                INSERT INTO campaign_messages(campaign_id, subject, text_body, persona_id, total_recipients, status, is_follow_up, parent_batch_id)
+                VALUES(${campaign.id}, ${subject}, ${p.text}, ${persona.id}, ${recipients.length}, 'sending', ${isFollowUp}, ${parentBatchId})
                 RETURNING *
             `;
 
