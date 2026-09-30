@@ -16,6 +16,7 @@ Reviewed 23 September 2026 against official documentation. Plans and account app
 | Quolle | 100 | 3,000 | Bearer API key (qle_) |
 | Send.dev | 100 | 3,000 | Bearer API key |
 | Epostix | 100 | 3,000 | Bearer API key (tix_live_) |
+| Anypost | 100 | 3,000 | Bearer API key (ap_) |
 
 Brevo/Mailgun/GoSend 30-day totals are calculations from daily allowances, not independent monthly entitlements. Maileroo's monthly allowance does not establish 100 guaranteed daily sends. Check account hourly limits. A 31-day month differs from a 30-day planning period. External account usage is not fetched by this project.
 
@@ -114,3 +115,11 @@ Add a sending domain in your Epostix dashboard under Domains. Publish the displa
 Sending uses `POST https://api.epostix.com/v1/emails` with Bearer authentication, `from`, `to` array, `subject`, `text`, `html`, `reply_to`, custom `headers`, and an `Idempotency-Key` header. The adapter supports Check Setup using `GET https://api.epostix.com/v1/domains` to inspect verification status. Free allowance: 3,000/month (€0/mo, 100/day soft planning cap). EU-hosted with native GDPR compliance.
 
 Sources: [Docs](https://docs.epostix.com/), [API Reference](https://docs.epostix.com/api/reference/send-email).
+
+## Anypost
+
+Add a sending domain in your Anypost dashboard under Domains. Publish the displayed CNAME DNS records in your DNS provider and verify them. Under API Keys, generate a key with Full or Send-only access (starts with `ap_`). Paste the key here.
+
+Sending uses `POST https://api.anypost.com/v1/email` with Bearer authentication, `from`, `to` array, `subject`, `text`, `html`, `reply_to`, custom `headers`, and an `Idempotency-Key` header. The adapter supports Check Setup using `GET https://api.anypost.com/v1/domains` to inspect domain verification status. Free allowance: 100/day and 3,000/month (hard cap, $0 forever). Rate limit: 60 sends/min.
+
+Sources: [Docs](https://anypost.com/docs), [API Reference](https://anypost.com/docs/send-email).
