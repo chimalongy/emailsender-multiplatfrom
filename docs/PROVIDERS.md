@@ -15,6 +15,7 @@ Reviewed 23 September 2026 against official documentation. Plans and account app
 | NoticeAPI | 100 | 3,000 | Bearer API key |
 | Quolle | 100 | 3,000 | Bearer API key (qle_) |
 | Send.dev | 100 | 3,000 | Bearer API key |
+| Epostix | 100 | 3,000 | Bearer API key (tix_live_) |
 
 Brevo/Mailgun/GoSend 30-day totals are calculations from daily allowances, not independent monthly entitlements. Maileroo's monthly allowance does not establish 100 guaranteed daily sends. Check account hourly limits. A 31-day month differs from a 30-day planning period. External account usage is not fetched by this project.
 
@@ -105,3 +106,11 @@ Open Domains in your do.dev / send.dev dashboard, add your domain, and publish t
 Sending uses `POST https://api.do.dev/v1/send/emails/send` with Bearer authentication, `from` object (`email`, `name`), `to` array, `subject`, `text`, `html`, and `replyTo`. Note that custom threading headers are explicitly rejected by send.dev with a 400 validation error, so the adapter omits them while preserving the unique `replyTo` address. The adapter supports Check Setup using `GET https://api.do.dev/v1/send/domains`. Free Hobby allowance: 3,000/month (100/day soft planning cap, 10 requests/minute rate limit).
 
 Sources: [Docs](https://docs.do.dev/send), [Pricing & Limits](https://docs.do.dev/send).
+
+## Epostix
+
+Add a sending domain in your Epostix dashboard under Domains. Publish the displayed DNS records (SPF, DKIM, reverse DNS) in your DNS provider and verify them. Under API Keys, generate a key with transactional sending scope (starts with `tix_live_`). Paste the key here.
+
+Sending uses `POST https://api.epostix.com/v1/emails` with Bearer authentication, `from`, `to` array, `subject`, `text`, `html`, `reply_to`, custom `headers`, and an `Idempotency-Key` header. The adapter supports Check Setup using `GET https://api.epostix.com/v1/domains` to inspect verification status. Free allowance: 3,000/month (€0/mo, 100/day soft planning cap). EU-hosted with native GDPR compliance.
+
+Sources: [Docs](https://docs.epostix.com/), [API Reference](https://docs.epostix.com/api/reference/send-email).
