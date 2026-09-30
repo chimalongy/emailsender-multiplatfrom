@@ -181,12 +181,12 @@ export default function Dashboard({initialTab='Overview'}){
  {page==='Campaigns'&&<>
   {selectedCampaign?(
    <div>
-    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'20px',flexWrap:'wrap',gap:'12px'}}>
-     <div style={{display:'flex',alignItems:'center',gap:'12px'}}>
+    <div className="campaign-header-row">
+     <div className="campaign-title-group">
       <button className="secondary" onClick={()=>{setSelectedCampaignId(null);setEditingRecipients(false);}}>← All Campaigns</button>
-      <h2 style={{margin:0}}>{selectedCampaign.name}</h2>
+      <h2>{selectedCampaign.name}</h2>
      </div>
-     <div style={{display:'flex',gap:'12px',alignItems:'center'}}>
+     <div className="campaign-meta-actions">
       <span className="badge green">{selectedCampaign.recipients?.length||0} recipient{(selectedCampaign.recipients?.length===1)?'':'s'}</span>
       <button type="button" className="link danger" disabled={busy} onClick={()=>deleteCampaign(selectedCampaign)}>Delete Campaign</button>
      </div>
@@ -257,7 +257,7 @@ export default function Dashboard({initialTab='Overview'}){
          {campaignMsg.sendMode==='schedule'?'QStash Scheduled Delivery':'Immediate Waterfall'}
         </span>
        </div>
-       <div style={{display:'flex',gap:'16px',marginBottom:'8px',fontSize:'13px'}}>
+       <div className="campaign-dispatch-options">
         <label style={{display:'flex',alignItems:'center',gap:'6px',cursor:'pointer',fontWeight:'normal'}}>
          <input type="radio" name="sendMode" checked={campaignMsg.sendMode==='now'} onChange={()=>setCampaignMsg({...campaignMsg,sendMode:'now'})}/>
          Send Immediately
@@ -297,7 +297,7 @@ export default function Dashboard({initialTab='Overview'}){
        </div>
        {!editingRecipients?(
         <div style={{maxHeight:'220px',overflowY:'auto',background:'var(--bg)',borderRadius:'8px',padding:'12px',display:'flex',flexWrap:'wrap',gap:'6px'}}>
-         {selectedCampaign.recipients?.map((addr,i)=><span key={i} className="badge" style={{background:'#fff',border:'1px solid var(--line)',fontSize:'12px',padding:'4px 9px'}}>{addr}</span>)}
+         {selectedCampaign.recipients?.map((addr,i)=><span key={i} className="badge recipient-tag">{addr}</span>)}
         </div>
        ):(
         <div className="form">
@@ -396,7 +396,7 @@ export default function Dashboard({initialTab='Overview'}){
           </div>
           <span className="badge green">{(c.recipients||[]).length} recipient{(c.recipients?.length===1)?'':'s'}</span>
          </div>
-         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginTop:'14px',paddingTop:'12px',borderTop:'1px solid var(--line)'}}>
+         <div className="campaign-card-footer">
           <button onClick={()=>{setSelectedCampaignId(c.id);setRecipientEditText((c.recipients||[]).join('\n'));setEditingRecipients(false);}}>Open campaign & send →</button>
           <button type="button" className="link danger" disabled={busy} onClick={()=>deleteCampaign(c)}>Delete</button>
          </div>
@@ -672,7 +672,7 @@ export default function Dashboard({initialTab='Overview'}){
       <button type="button" className="secondary" style={{padding:'6px 12px',fontSize:'13px'}} onClick={()=>setBatchDetailsModal(null)}>✕ Close</button>
      </div>
      <div className="modal-body">
-      <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'12px',marginBottom:'18px'}}>
+      <div className="batch-modal-stats">
        <div style={{background:'var(--bg)',padding:'12px',borderRadius:'8px'}}>
         <span className="muted" style={{fontSize:'11px',textTransform:'uppercase'}}>Total Recipients</span>
         <strong style={{display:'block',fontSize:'20px',marginTop:'4px'}}>{batchDetailsModal.batch?.total_recipients||0}</strong>
@@ -686,8 +686,8 @@ export default function Dashboard({initialTab='Overview'}){
         <strong style={{display:'block',fontSize:'20px',marginTop:'4px',color:'#a64038'}}>{batchDetailsModal.batch?.failed_count||0}</strong>
        </div>
       </div>
-      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:'10px',flexWrap:'wrap',marginBottom:'12px'}}>
-       <div style={{display:'flex',gap:'6px'}}>
+      <div className="batch-filter-bar">
+       <div className="batch-filter-btns">
         {['all','accepted','failed','suppressed'].map(f=>{
          const count = f==='all' ? (batchDetailsModal.deliveries||[]).length : (batchDetailsModal.deliveries||[]).filter(d=>d.status===f).length;
          return (
@@ -710,7 +710,9 @@ export default function Dashboard({initialTab='Overview'}){
         <p className="muted" style={{margin:0}}>No per-recipient delivery logs recorded for this batch yet.</p>
        </div>
       ) : (
-       <div style={{overflowX:'auto',maxHeight:'380px'}}>
+       <>
+       <div className="mobile-swipe-hint">⇄ Swipe horizontally to view full delivery details</div>
+       <div className="delivery-table-wrap">
         <table className="delivery-table">
          <thead>
           <tr>
@@ -743,6 +745,7 @@ export default function Dashboard({initialTab='Overview'}){
          </tbody>
         </table>
        </div>
+       </>
       )}
      </div>
      <div className="modal-footer">

@@ -522,3 +522,208 @@ html, body {
   background: #fef7ea;
   color: #b07d12;
 }
+
+
+/* ==========================================================================
+   Campaigns Page Mobile Responsiveness & Layout
+   ========================================================================== */
+.campaign-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+  gap: 14px;
+}
+.campaign-title-group {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.campaign-title-group h2 {
+  margin: 0;
+  font-size: 22px;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+.campaign-meta-actions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+.campaign-dispatch-options {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 8px;
+  font-size: 13px;
+  flex-wrap: wrap;
+}
+.recipient-tag {
+  background: #fff;
+  border: 1px solid var(--line);
+  font-size: 12px;
+  padding: 4px 9px;
+  word-break: break-all;
+  overflow-wrap: anywhere;
+  max-width: 100%;
+}
+.campaign-card-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.batch-modal-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin-bottom: 18px;
+}
+.batch-filter-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.batch-filter-btns {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.delivery-table-wrap {
+  width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  max-height: 420px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  margin-top: 6px;
+}
+
+/* Campaigns Media Queries for Tablets & Mobile */
+@media (max-width: 768px) {
+  .campaign-header-row {
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 12px !important;
+    margin-bottom: 16px !important;
+  }
+  .campaign-title-group {
+    width: 100%;
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    gap: 10px !important;
+  }
+  .campaign-title-group button {
+    padding: 7px 12px !important;
+    font-size: 12px !important;
+  }
+  .campaign-title-group h2 {
+    font-size: 19px !important;
+  }
+  .campaign-meta-actions {
+    width: 100% !important;
+    display: flex !important;
+    justify-content: space-between !important;
+    align-items: center !important;
+    padding-top: 10px !important;
+    border-top: 1px solid var(--line) !important;
+  }
+  .campaign-dispatch-options {
+    flex-direction: column !important;
+    gap: 10px !important;
+  }
+  .campaign-card-footer {
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 8px !important;
+  }
+  .campaign-card-footer button {
+    width: 100% !important;
+    text-align: center !important;
+    padding: 10px 14px !important;
+  }
+
+  /* Modal on Mobile */
+  .modal-overlay {
+    padding: 8px !important;
+  }
+  .modal-dialog {
+    width: 100% !important;
+    max-height: 96vh !important;
+    border-radius: 10px !important;
+  }
+  .modal-header {
+    padding: 14px 16px !important;
+    gap: 10px !important;
+  }
+  .modal-header h2 {
+    font-size: 16px !important;
+  }
+  .modal-body {
+    padding: 14px 16px !important;
+  }
+  .batch-modal-stats {
+    grid-template-columns: 1fr !important;
+    gap: 8px !important;
+  }
+  .batch-modal-stats > div {
+    display: flex !important;
+    justify-content: space-between !important;
+    align-items: center !important;
+    padding: 10px 14px !important;
+  }
+  .batch-modal-stats strong {
+    margin-top: 0 !important;
+    font-size: 18px !important;
+  }
+  .batch-filter-bar {
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 10px !important;
+  }
+  .batch-filter-bar input[type="search"] {
+    width: 100% !important;
+    box-sizing: border-box !important;
+    font-size: 16px !important; /* iOS zoom prevention */
+    padding: 10px 12px !important;
+  }
+  .batch-filter-btns {
+    width: 100% !important;
+    display: flex !important;
+    flex-wrap: wrap !important;
+    gap: 4px !important;
+  }
+  .batch-filter-btns button {
+    flex: 1 0 auto !important;
+    font-size: 11px !important;
+    padding: 7px 8px !important;
+    text-align: center !important;
+  }
+  .delivery-table {
+    min-width: 580px !important;
+  }
+  .modal-footer button {
+    width: 100% !important;
+    padding: 12px !important;
+    text-align: center !important;
+  }
+}
+
+@media (max-width: 480px) {
+  .campaign-title-group h2 {
+    font-size: 17px !important;
+  }
+  .batch-filter-btns button {
+    flex-basis: calc(50% - 4px) !important;
+  }
+}
