@@ -12,6 +12,8 @@ Reviewed 23 September 2026 against official documentation. Plans and account app
 | Maileroo | No fixed app cap | 3,000 | Domain sending key |
 | Sequenzy | No fixed app cap | 2,500 | Bearer API key |
 | Mailtrap | 150 | 4,000 | API token |
+| NoticeAPI | 100 | 3,000 | Bearer API key |
+| Quolle | 100 | 3,000 | Bearer API key (qle_) |
 
 Brevo/Mailgun/GoSend 30-day totals are calculations from daily allowances, not independent monthly entitlements. Maileroo's monthly allowance does not establish 100 guaranteed daily sends. Check account hourly limits. A 31-day month differs from a 30-day planning period. External account usage is not fetched by this project.
 
@@ -78,3 +80,19 @@ Open Sending Domains → Add Domain. Publish the displayed DNS records (SPF, DKI
 Sending uses `POST https://send.api.mailtrap.io/api/send` with Bearer authentication, from object, to array, subject, text, html, reply_to object, headers, and category. The adapter supports Check Setup using `GET https://mailtrap.io/api/domains` to inspect verification and compliance status. Free allowance: 150/day and 4,000/month.
 
 Sources: [Sending API](https://docs.mailtrap.io/docs/sending-api-reference), [Domains API](https://docs.mailtrap.io/api/domains), [Pricing](https://mailtrap.io/pricing/).
+
+## NoticeAPI
+
+Add your sending domain in the NoticeAPI dashboard under Domains. Publish the displayed DNS records (Ownership, SPF, DKIM) in your DNS provider and verify them. Add a payment card to activate production sending ($0/month free tier). Copy your API key (starting with `ntc_`) and paste it here.
+
+Sending uses `POST https://www.noticeapi.com/api/v1/email/send` with Bearer authentication, `from` string, `to` string, `subject`, `text`, `html`, `reply_to`, custom `headers`, and an `Idempotency-Key` header. The adapter supports Check Setup using `GET https://www.noticeapi.com/api/v1/domains` to inspect verification status when authorized. Free allowance: 100/day and 3,000/month.
+
+Sources: [Docs](https://www.noticeapi.com/docs), [Pricing](https://www.noticeapi.com/pricing).
+
+## Quolle
+
+Open Domains in your Quolle dashboard and add your sending domain. Add the displayed DNS records (SPF, DKIM, DMARC) to your DNS provider and verify. Under API Keys, generate a key (starts with `qle_`). Paste the key here.
+
+Sending uses `POST https://api.quolle.com/v1/emails/send` with Bearer authentication, `from`, `to`, `subject`, `text`, `html`, `replyTo`, and an `Idempotency-Key` header. The adapter supports Check Setup using `GET https://api.quolle.com/v1/domains` to inspect domain verification status. Free Starter allowance: 100/day and 3,000/month.
+
+Sources: [Docs](https://quolle.com/docs), [Pricing](https://quolle.com/pricing).
