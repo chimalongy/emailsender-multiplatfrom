@@ -11,6 +11,7 @@ Reviewed 23 September 2026 against official documentation. Plans and account app
 | GoSend | 100 | 3,000 | Bearer API key |
 | Maileroo | No fixed app cap | 3,000 | Domain sending key |
 | Sequenzy | No fixed app cap | 2,500 | Bearer API key |
+| Mailtrap | 150 | 4,000 | API token |
 
 Brevo/Mailgun/GoSend 30-day totals are calculations from daily allowances, not independent monthly entitlements. Maileroo's monthly allowance does not establish 100 guaranteed daily sends. Check account hourly limits. A 31-day month differs from a 30-day planning period. External account usage is not fetched by this project.
 
@@ -69,3 +70,11 @@ Add and authenticate the sending domain in the dashboard, then create an API key
 Sending uses `POST https://api.sequenzy.com/api/v1/transactional/send` with Bearer authentication, from, to, subject, body and replyTo. The documented request schema does not include custom threading headers, so the app does not invent them. Cloudflare can match the unique reply address, but recipient-client threading is not guaranteed. Free allowance: 2,500/month; no daily cap asserted here.
 
 Sources: [Transactional API](https://docs.sequenzy.com/api-reference/transactional/send), [Pricing](https://www.sequenzy.com/pricing).
+ 
+## Mailtrap
+
+Open Sending Domains → Add Domain. Publish the displayed DNS records (SPF, DKIM, DMARC) in your DNS provider and verify them. Under API Tokens or Sending Domains, copy your Sending API Token. Paste the token here.
+
+Sending uses `POST https://send.api.mailtrap.io/api/send` with Bearer authentication, from object, to array, subject, text, html, reply_to object, headers, and category. The adapter supports Check Setup using `GET https://mailtrap.io/api/domains` to inspect verification and compliance status. Free allowance: 150/day and 4,000/month.
+
+Sources: [Sending API](https://docs.mailtrap.io/docs/sending-api-reference), [Domains API](https://docs.mailtrap.io/api/domains), [Pricing](https://mailtrap.io/pricing/).
