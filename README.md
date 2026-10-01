@@ -54,7 +54,7 @@ When Cloudflare receiving is enabled for the sender domain, supported adapters s
 
 Incoming messages also match stored `In-Reply-To` and `References` IDs. Brevo/Mailgun return useful wire IDs; other provider resource IDs are stored separately and never assumed to be RFC Message-IDs. Outgoing replies send threading headers where documented. Matching groups conversations; it does not authenticate the identity of the sender of a reply.
 
-**GoSend's published API lacks custom Reply-To and threading headers.** Its sends work, but incoming replies may require Mailbox → Message details → Link conversation using the outgoing record UUID. **Sequenzy supports Reply-To but does not document custom threading headers.** Disable Sequenzy reply tracking to preserve your Cloudflare Reply-To; app-side matching works through the token, while recipient-side threading is not guaranteed. These limits are visible in Compose.
+**Sequenzy supports Reply-To but does not document custom threading headers.** Disable Sequenzy reply tracking to preserve your Cloudflare Reply-To; app-side matching works through the token, while recipient-side threading is not guaranteed. These limits are visible in Compose.
 
 ## Delivery status and suppression
 
