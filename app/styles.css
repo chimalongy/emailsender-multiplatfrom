@@ -579,6 +579,30 @@ html, body {
   gap: 10px;
   flex-wrap: wrap;
 }
+.campaign-list-card {
+  padding: 20px;
+  cursor: pointer;
+  transition: transform 0.16s ease, box-shadow 0.16s ease, border-color 0.16s ease;
+  border: 1px solid var(--line);
+}
+.campaign-list-card:hover {
+  transform: translateY(-2px);
+  border-color: #3b82f6;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.06);
+}
+.campaign-slug-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: monospace;
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--bg);
+  padding: 2px 7px;
+  border-radius: 4px;
+  margin-top: 6px;
+  border: 1px solid var(--line);
+}
 .batch-modal-stats {
   display: grid;
   grid-template-columns: repeat(3, 1fr);

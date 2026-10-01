@@ -5,7 +5,7 @@ import {randomUUID} from 'node:crypto';
 import {PGlite} from '@electric-sql/pglite';
 import {encrypt,decrypt,session,validSession,signature,inboundOK} from '../lib/security.js';
 import {buildRequest,sendEmail} from '../lib/providers.js';
-import {email,domain,parseEmailList} from '../lib/validation.js';
+import {email,domain,parseEmailList,campaignSlug,matchesCampaign} from '../lib/validation.js';
 test('credentials store as JSON and decrypt accurately',()=>{const a=encrypt({apiKey:'secret'});assert.deepEqual(decrypt(a),{apiKey:'secret'});});
 test('session validates and expires',()=>{const s=session();assert.ok(validSession(s));assert.ok(!validSession('expired'));});
 
@@ -104,4 +104,16 @@ test('blacklist table stores excluded recipients and filters campaign email list
  assert.deepEqual(filtered, ['good@example.com', 'another@example.com']);
  assert.deepEqual(removed, ['bad@example.com', 'spam@example.org']);
 });
+
+test('campaignSlug generates clean URL slugs and matchesCampaign matches slugs, names, or ids', () => {
+ const c1 = { id: 'c-123', name: 'VIP Newsletter 2026!' };
+ const c2 = { id: 'c-456', name: 'Product Launch & Updates' };
+ assert.equal(campaignSlug(c1), 'vip-newsletter-2026');
+ assert.equal(campaignSlug(c2), 'product-launch-updates');
+ assert.ok(matchesCampaign(c1, 'vip-newsletter-2026'));
+ assert.ok(matchesCampaign(c1, 'VIP Newsletter 2026!'));
+ assert.ok(matchesCampaign(c1, 'c-123'));
+ assert.ok(!matchesCampaign(c1, 'product-launch-updates'));
+});
+
 

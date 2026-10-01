@@ -2,11 +2,11 @@
 import {useEffect,useState} from 'react';
 import {useRouter,usePathname} from 'next/navigation';
 import {providers} from '../lib/catalog.js';
-import {parseEmailList} from '../lib/validation.js';
+import {parseEmailList, campaignSlug, matchesCampaign} from '../lib/validation.js';
 const fmt=d=>new Date(d).toLocaleString();
 async function api(path,body){const r=await fetch('/api/'+path,body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const d=await r.json();if(r.status===401){location.href='/login';throw Error('Sign in required');}if(!r.ok&&!(path==='send'&&d.status==='failed'))throw Error(d.error||'Request failed');return d;}
 const initialConnection=p=>({provider:p,label:providers[p].name,domains:'',credentials:{},dailyLimit:providers[p].daily??'',monthlyLimit:providers[p].monthly??'',providerMonthlyLimit:providers[p].providerMonthly??'',providerCycle:'calendar',providerAnchor:new Date().toISOString(),region:'us',enabled:false});
-export default function Dashboard({initialTab='Overview'}){
+export default function Dashboard({initialTab='Overview', initialCampaignSlug=null}){
  const router=useRouter();
  const pathname=usePathname();
  const pathToTab=p=>{
@@ -51,6 +51,28 @@ export default function Dashboard({initialTab='Overview'}){
  async function loadCalendar(year,month){setCalLoading(true);try{const d=await api(`campaigns/calendar?year=${year}&month=${month}`);setCalData(d);}catch(e){setError(e.message);}finally{setCalLoading(false);}}
  useEffect(()=>{if(page==='Schedules')loadCalendar(calYear,calMonth);},[page,calYear,calMonth]);
  useEffect(()=>{const t=pathToTab(pathname);if(t&&t!==page)setPage(t);},[pathname]);
+ useEffect(()=>{
+  if(initialCampaignSlug && (data.campaigns||[]).length){
+   const found=(data.campaigns||[]).find(c=>matchesCampaign(c,initialCampaignSlug));
+   if(found){
+    setSelectedCampaignId(found.id);
+    setRecipientEditText((found.recipients||[]).join('\n'));
+   }
+  }
+ },[initialCampaignSlug,data.campaigns]);
+ useEffect(()=>{
+  if(!pathname)return;
+  const parts=pathname.replace(/^\//,'').split('/');
+  if(parts[0]==='campaigns'&&parts[1]&&(data.campaigns||[]).length){
+   const found=(data.campaigns||[]).find(c=>matchesCampaign(c,parts[1]));
+   if(found&&selectedCampaignId!==found.id){
+    setSelectedCampaignId(found.id);
+    setRecipientEditText((found.recipients||[]).join('\n'));
+   }
+  }else if(parts[0]==='campaigns'&&!parts[1]&&selectedCampaignId){
+   setSelectedCampaignId(null);
+  }
+ },[pathname,data.campaigns,selectedCampaignId]);
  async function cancelScheduledBroadcast(id){if(!confirm('Are you sure you want to cancel this scheduled broadcast?'))return;await run(async()=>{await api('campaigns/cancel-schedule',{id});await refresh();if(page==='Schedules')await loadCalendar(calYear,calMonth);setNotice('Scheduled broadcast was cancelled.');});}
  async function refresh(){setData(await api('state'));}
  async function run(fn){setBusy(true);setError('');setNotice('');try{await fn();}catch(e){setError(e.message);}finally{setBusy(false);}}
@@ -96,8 +118,10 @@ export default function Dashboard({initialTab='Overview'}){
  const campaignSelectedDomain=campaignSelectedPersona?campaignSelectedPersona.email.split('@')[1]:null;
  const campaignEligiblePlatforms=campaignSelectedDomain?activeSenders.filter(c=>c.domains.includes(campaignSelectedDomain)):activeSenders;
  const campaignEligibleCapacity=campaignEligiblePlatforms.reduce((n,c)=>n+Math.max(0,getDailyLimit(c)-getDailySent(c)),0);
- async function createCampaign(e){e.preventDefault();const parsed=parseEmailList(campaignForm.emails);if(!parsed.length){setError('Please enter at least one valid recipient email address.');return;}if(parsed.length>availableDailyCapacity){setError(`Cannot create campaign: The recipient list contains ${parsed.length} emails, but the total available daily sending capacity across all active platforms is only ${availableDailyCapacity}. Please increase platform limits or reduce your recipient list.`);return;}await run(async()=>{const res=await api('campaigns',{name:campaignForm.name,recipients:parsed});await refresh();setCampaignForm({name:'',emails:''});const removedMsg=res.blacklistedRemovedCount?` (${res.blacklistedRemovedCount} blacklisted email${res.blacklistedRemovedCount===1?' was':'s were'} automatically removed)`:'';setNotice(`Campaign "${campaignForm.name}" created with ${res.campaign?.recipients?.length||parsed.length} recipient${(res.campaign?.recipients?.length||parsed.length)===1?'':'s'}${removedMsg}.`);if(res.campaign?.id){setSelectedCampaignId(res.campaign.id);setRecipientEditText((res.campaign.recipients||[]).join('\n'));}});}
- async function deleteCampaign(c){if(!confirm(`Delete campaign "${c.name}"? This will also remove its campaign message history.`))return;await run(async()=>{await api('campaigns',{action:'delete',id:c.id});if(selectedCampaignId===c.id)setSelectedCampaignId(null);await refresh();setNotice(`Campaign "${c.name}" deleted.`);});}
+ function selectCampaign(c){setSelectedCampaignId(c.id);setRecipientEditText((c.recipients||[]).join('\n'));setEditingRecipients(false);router.push('/campaigns/'+campaignSlug(c));}
+ function backToAllCampaigns(){setSelectedCampaignId(null);setEditingRecipients(false);router.push('/campaigns');}
+ async function createCampaign(e){e.preventDefault();const parsed=parseEmailList(campaignForm.emails);if(!parsed.length){setError('Please enter at least one valid recipient email address.');return;}if(parsed.length>availableDailyCapacity){setError(`Cannot create campaign: The recipient list contains ${parsed.length} emails, but the total available daily sending capacity across all active platforms is only ${availableDailyCapacity}. Please increase platform limits or reduce your recipient list.`);return;}await run(async()=>{const res=await api('campaigns',{name:campaignForm.name,recipients:parsed});await refresh();setCampaignForm({name:'',emails:''});const removedMsg=res.blacklistedRemovedCount?` (${res.blacklistedRemovedCount} blacklisted email${res.blacklistedRemovedCount===1?' was':'s were'} automatically removed)`:'';setNotice(`Campaign "${campaignForm.name}" created with ${res.campaign?.recipients?.length||parsed.length} recipient${(res.campaign?.recipients?.length||parsed.length)===1?'':'s'}${removedMsg}.`);if(res.campaign?.id){setSelectedCampaignId(res.campaign.id);setRecipientEditText((res.campaign.recipients||[]).join('\n'));router.push('/campaigns/'+campaignSlug(res.campaign));}});}
+ async function deleteCampaign(c){if(!confirm(`Delete campaign "${c.name}"? This will also remove its campaign message history.`))return;await run(async()=>{await api('campaigns',{action:'delete',id:c.id});if(selectedCampaignId===c.id){setSelectedCampaignId(null);router.push('/campaigns');}await refresh();setNotice(`Campaign "${c.name}" deleted.`);});}
  async function saveRecipients(c){const parsed=parseEmailList(recipientEditText);if(!parsed.length){setError('Please enter at least one valid recipient email address.');return;}if(parsed.length>availableDailyCapacity){setError(`Cannot update campaign: Recipient list has ${parsed.length} emails, but available daily sending capacity across all active platforms is only ${availableDailyCapacity}.`);return;}await run(async()=>{const res=await api('campaigns',{action:'update',id:c.id,recipients:parsed});await refresh();setEditingRecipients(false);const removedMsg=res.blacklistedRemovedCount?` (${res.blacklistedRemovedCount} blacklisted email${res.blacklistedRemovedCount===1?' was':'s were'} automatically removed)`:'';setNotice(`Updated "${c.name}" with ${res.campaign?.recipients?.length||parsed.length} recipient${(res.campaign?.recipients?.length||parsed.length)===1?'':'s'}${removedMsg}.`);});}
  async function addToBlacklist(e){e.preventDefault();const parsed=parseEmailList(blacklistForm.emails);if(!parsed.length){setError('Please enter at least one valid email address.');return;}await run(async()=>{const res=await api('blacklist',{emails:parsed,reason:blacklistForm.reason});await refresh();setBlacklistForm(f=>({...f,emails:''}));setNotice(`Added ${res.addedCount||parsed.length} email${(res.addedCount||parsed.length)===1?'':'s'} to the blacklist.`);});}
  async function removeFromBlacklist(b){if(!confirm(`Remove "${b.email}" from the blacklist?`))return;await run(async()=>{await api('blacklist',{action:'delete',id:b.id});await refresh();setNotice(`Removed "${b.email}" from the blacklist.`);});}
@@ -182,15 +206,16 @@ export default function Dashboard({initialTab='Overview'}){
      <nav>{[['Overview','◫'],['Campaigns','📢'],['Blacklist','⊘'],['Schedules','📅'],['Connected','⇄'],['Personas','◎'],['Compose','↗'],['Mailbox','▤'],['Deployment','⌘']].map(([p,icon])=><button key={p} className={(page===p||(p==='Connected'&&page==='Connections'))?'active':''} onClick={()=>{if(p==='Connected')setConnectedTab('capacity');if(p==='Campaigns')setSelectedCampaignId(null);if(p==='Schedules')setSelectedCalDay(null);navigate(p);}}><span>{icon}</span>{p}{p==='Connected'&&<small>{senders.length}</small>}{p==='Campaigns'&&<small>{(data.campaigns||[]).length}</small>}{p==='Blacklist'&&<small>{(data.blacklist||[]).length}</small>}{p==='Schedules'&&<small>{(data.scheduledBroadcasts||[]).length}</small>}</button>)}</nav>
      <div className="sidebarfoot"><span className="dot"/>Private workspace<p>Vercel · Neon · Cloudflare</p><button className="link" onClick={()=>run(async()=>{await api('logout',{});location.href='/login';})}>Sign out</button></div>
     </div>
-   </aside><main><header><div><p className="eyebrow">EMAIL WORKSPACE / {(page==='Connections'?'CONNECTED':page).toUpperCase()}</p><h1>{({Overview:'Your mail, connected.',Campaigns:'Targeted email broadcasts.',Blacklist:'Excluded recipients & protection.',Schedules:'Planned dispatches & calendar capacity.',Connected:'Platform capacity and usage.',Connections:'Connect your platforms.',Personas:'Choose who you send as.',Compose:'A new conversation.',Mailbox:'Your conversations.',Deployment:'Ready to go live.'})[page]}</h1></div><button onClick={()=>navigate('Compose')}>+ Compose email</button></header>{error&&<div role="alert" className="alert error">{error}</div>}{notice&&<div role="status" className="alert success">{notice}</div>}{loading&&<p className="muted">Loading your workspace…</p>}
+   </aside><main><header><div><p className="eyebrow">{page==='Campaigns'&&selectedCampaign?`EMAIL WORKSPACE / CAMPAIGNS / ${selectedCampaign.name.toUpperCase()}`:`EMAIL WORKSPACE / ${(page==='Connections'?'CONNECTED':page).toUpperCase()}`}</p><h1>{page==='Campaigns'&&selectedCampaign?selectedCampaign.name:({Overview:'Your mail, connected.',Campaigns:'Targeted email broadcasts.',Blacklist:'Excluded recipients & protection.',Schedules:'Planned dispatches & calendar capacity.',Connected:'Platform capacity and usage.',Connections:'Connect your platforms.',Personas:'Choose who you send as.',Compose:'A new conversation.',Mailbox:'Your conversations.',Deployment:'Ready to go live.'})[page]}</h1></div><button onClick={()=>navigate('Compose')}>+ Compose email</button></header>{error&&<div role="alert" className="alert error">{error}</div>}{notice&&<div role="status" className="alert success">{notice}</div>}{loading&&<p className="muted">Loading your workspace…</p>}
  {page==='Overview'&&<><section className="stats"><div className="card"><p>Daily sent / Capacity</p><strong>{totalDailySent.toLocaleString()}<small> / {totalDailyCapacity>0?totalDailyCapacity.toLocaleString():'No limit'}</small></strong><progress max={totalDailyCapacity||1} value={totalDailyCapacity?totalDailySent:0}/><div style={{display:'flex',justifyContent:'space-between',fontSize:'11px',color:'var(--muted)',marginTop:'6px'}}><span>{totalDailyCapacity>0?`${Math.max(0,totalDailyCapacity-totalDailySent).toLocaleString()} remaining today`:'No daily cap'}</span><span>{dailyPercent}% used</span></div>{senders.length>0&&activeSenders.length!==senders.length&&<small style={{display:'block',marginTop:'5px',color:'#b07d12'}}>{activeDailyCapacity.toLocaleString()} active capacity ({activeSenders.length}/{senders.length} enabled)</small>}</div><div className="card"><p>Monthly sent / Capacity</p><strong>{totalMonthlySent.toLocaleString()}<small> / {totalMonthlyCapacity>0?totalMonthlyCapacity.toLocaleString():'No limit'}</small></strong><progress max={totalMonthlyCapacity||1} value={totalMonthlyCapacity?totalMonthlySent:0}/><div style={{display:'flex',justifyContent:'space-between',fontSize:'11px',color:'var(--muted)',marginTop:'6px'}}><span>{totalMonthlyCapacity>0?`${Math.max(0,totalMonthlyCapacity-totalMonthlySent).toLocaleString()} remaining`:'No monthly cap'}</span><span>{monthlyPercent}% used</span></div>{senders.length>0&&activeSenders.length!==senders.length&&<small style={{display:'block',marginTop:'5px',color:'#b07d12'}}>{activeMonthlyCapacity.toLocaleString()} active capacity ({activeSenders.length}/{senders.length} enabled)</small>}</div><div className="card"><p>Connected platforms</p><strong>{activeSenders.length}<small> / {senders.length} active</small></strong><p style={{fontSize:'12px',color:'var(--muted)',margin:'10px 0 10px'}}>{data.personas.length} persona{data.personas.length===1?'':'s'} configured</p><button className="link" onClick={()=>{setConnectedTab('capacity');navigate('Connected');}}>View platform details →</button></div></section><div className="sectiontitle"><div><h2>Sending capacity overview</h2><p className="muted">Combined sending quota calculated across your connected platforms.</p></div><div style={{display:'flex',gap:'10px'}}><button className="secondary" onClick={()=>run(refresh)}>Refresh</button><button onClick={()=>{setConnectedTab('capacity');navigate('Connected');}}>View Connected Page →</button></div></div>{!senders.length?<div className="empty card"><div className="emptyicon">⇄</div><h2>Your first connection starts here.</h2><p>Add a sending provider, verify your domain, then create your persona.</p><button onClick={()=>{setConnectedTab('settings');navigate('Connected');}}>Connect a platform →</button></div>:<div className="card" style={{padding:'24px'}}><div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',flexWrap:'wrap',gap:'16px',marginBottom:'20px'}}><div><h3 style={{fontSize:'17px',marginBottom:'4px'}}>Platforms Capacity Breakdown</h3><p className="muted" style={{margin:0}}>{senders.length} connected platform{senders.length===1?'':'s'} ({activeSenders.length} active) providing {totalDailyCapacity.toLocaleString()} daily and {totalMonthlyCapacity.toLocaleString()} monthly sending capacity.</p></div><button className="link" onClick={()=>{setConnectedTab('capacity');navigate('Connected');}}>Full platform meters & reset schedules →</button></div><div style={{display:'grid',gap:'10px'}}>{senders.map(c=>{const dUsed=getDailySent(c),dLimit=getDailyLimit(c),mUsed=getMonthlySent(c),mLimit=getMonthlyLimit(c);return <div key={c.id} style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'12px 16px',background:'var(--bg)',borderRadius:'8px',gap:'16px',flexWrap:'wrap'}}><div style={{display:'flex',alignItems:'center',gap:'10px',minWidth:'170px'}}><div><b style={{fontSize:'14px',display:'block'}}>{c.label}</b><span className="muted" style={{fontSize:'11px'}}>{c.domains.join(', ')}</span></div><span className={'badge '+(c.enabled?'green':'')} style={{marginLeft:'auto'}}>{c.enabled?'Enabled':'Paused'}</span></div><div style={{display:'flex',gap:'20px',fontSize:'12px',alignItems:'center'}}><div><span className="muted" style={{fontSize:'10px',display:'block',textTransform:'uppercase',letterSpacing:'0.5px'}}>Daily allowance</span><b>{dUsed} / {dLimit||'No cap'}</b></div><div><span className="muted" style={{fontSize:'10px',display:'block',textTransform:'uppercase',letterSpacing:'0.5px'}}>Monthly allowance</span><b>{mUsed} / {mLimit||'No cap'}</b></div></div><button className="link" style={{fontSize:'12px'}} onClick={()=>edit(c)}>Manage settings →</button></div>;})}</div><p className="footnote" style={{marginTop:'18px'}}>Quotas are shared by every persona. Provider approval, external usage, hourly limits and actual billing periods may reduce available capacity. For detailed per-platform usage meters and reset timestamps, visit the <button className="link" style={{display:'inline',padding:0,fontSize:'inherit'}} onClick={()=>{setConnectedTab('capacity');navigate('Connected');}}>Connected page</button>.</p></div>}</>}
  {page==='Campaigns'&&<>
   {selectedCampaign?(
    <div>
     <div className="campaign-header-row">
      <div className="campaign-title-group">
-      <button className="secondary" onClick={()=>{setSelectedCampaignId(null);setEditingRecipients(false);}}>← All Campaigns</button>
+      <button className="secondary" onClick={backToAllCampaigns}>← All Campaigns</button>
       <h2>{selectedCampaign.name}</h2>
+      <span className="campaign-slug-badge">/campaigns/{campaignSlug(selectedCampaign)}</span>
      </div>
      <div className="campaign-meta-actions">
       <span className="badge green">{selectedCampaign.recipients?.length||0} recipient{(selectedCampaign.recipients?.length===1)?'':'s'}</span>
@@ -392,18 +417,19 @@ export default function Dashboard({initialTab='Overview'}){
        <p>Create a campaign to group recipient emails and send broadcast messages in one click.</p>
       </div>
      ):(
-      <div style={{display:'grid',gap:'12px'}}>
+      <div style={{display:'grid',gap:'14px'}}>
        {(data.campaigns||[]).map(c=>(
-        <div key={c.id} className="card" style={{padding:'18px'}}>
-         <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:'10px'}}>
+        <div key={c.id} className="card campaign-list-card" onClick={()=>selectCampaign(c)}>
+         <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:'12px'}}>
           <div>
-           <h3 style={{fontSize:'17px',margin:'0 0 4px'}}>{c.name}</h3>
+           <h3 style={{fontSize:'18px',margin:'0 0 4px',fontWeight:'600'}}>{c.name}</h3>
            <p className="muted" style={{fontSize:'12px',margin:0}}>Created {new Date(c.created_at).toLocaleDateString()} · {(c.messages||[]).length} broadcast{(c.messages?.length===1)?'':'s'}</p>
+           <span className="campaign-slug-badge">/campaigns/{campaignSlug(c)}</span>
           </div>
           <span className="badge green">{(c.recipients||[]).length} recipient{(c.recipients?.length===1)?'':'s'}</span>
          </div>
-         <div className="campaign-card-footer">
-          <button onClick={()=>{setSelectedCampaignId(c.id);setRecipientEditText((c.recipients||[]).join('\n'));setEditingRecipients(false);}}>Open campaign & send →</button>
+         <div className="campaign-card-footer" onClick={e=>e.stopPropagation()}>
+          <button onClick={()=>selectCampaign(c)}>Open campaign & send →</button>
           <button type="button" className="link danger" disabled={busy} onClick={()=>deleteCampaign(c)}>Delete</button>
          </div>
         </div>
