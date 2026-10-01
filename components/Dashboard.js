@@ -225,14 +225,14 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
     <div className="columns">
      <form className="card form composer" onSubmit={sendCampaignBroadcast}>
       {campaignMsg.isFollowUp&&(
-       <div style={{background:'#eff6ff',border:'1px solid #bfdbfe',borderRadius:'8px',padding:'12px 14px',marginBottom:'16px',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-        <div>
+       <div style={{background:'#eff6ff',border:'1px solid #bfdbfe',borderRadius:'8px',padding:'12px 14px',marginBottom:'16px',display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:'10px',maxWidth:'100%',boxSizing:'border-box'}}>
+        <div style={{minWidth:0,flex:'1 1 auto'}}>
          <strong style={{color:'#1e40af',fontSize:'12px',letterSpacing:'0.4px',display:'block'}}>FOLLOW-UP THREADING ENABLED</strong>
-         <span style={{color:'#1e3a8a',fontSize:'12px'}}>
+         <span style={{color:'#1e3a8a',fontSize:'12px',wordBreak:'break-word',overflowWrap:'anywhere'}}>
           This broadcast will be sent directly in the same conversation thread as Batch &quot;{selectedCampaign.messages?.find(m=>m.id===campaignMsg.parentBatchId)?.subject || 'Previous Batch'}&quot;.
          </span>
         </div>
-        <button type="button" className="secondary" style={{padding:'4px 10px',fontSize:'11px'}} onClick={()=>setCampaignMsg(prev=>({...prev,isFollowUp:false,parentBatchId:null,subject:''}))}>
+        <button type="button" className="secondary" style={{padding:'4px 10px',fontSize:'11px',flexShrink:0}} onClick={()=>setCampaignMsg(prev=>({...prev,isFollowUp:false,parentBatchId:null,subject:''}))}>
          ✕ Cancel Follow-up
         </button>
        </div>
@@ -245,8 +245,8 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
         {data.personas.map(p=><option value={p.id} key={p.id}>{p.name} — {p.email}</option>)}
        </select>
       </label>
-      <div style={{background:'var(--bg)',borderRadius:'8px',padding:'12px 14px',border:'1px solid var(--line)',marginBottom:'14px'}}>
-       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'4px'}}>
+      <div style={{background:'var(--bg)',borderRadius:'8px',padding:'12px 14px',border:'1px solid var(--line)',marginBottom:'14px',maxWidth:'100%',boxSizing:'border-box'}}>
+       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'4px',flexWrap:'wrap',gap:'6px'}}>
         <strong style={{fontSize:'12px',letterSpacing:'0.3px'}}>PLATFORM AUTO-ALLOCATION</strong>
         <span className="badge green" style={{fontSize:'11px'}}>Daily Capacity Waterfall</span>
        </div>
@@ -281,8 +281,8 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
       <label>Message
        <textarea required rows="8" maxLength="100000" value={campaignMsg.text} onChange={e=>setCampaignMsg({...campaignMsg,text:e.target.value})} placeholder="Write the email message for your recipients…"/>
       </label>
-      <div style={{background:'var(--bg)',borderRadius:'8px',padding:'12px 14px',border:'1px solid var(--line)',marginBottom:'14px'}}>
-       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'8px'}}>
+      <div style={{background:'var(--bg)',borderRadius:'8px',padding:'12px 14px',border:'1px solid var(--line)',marginBottom:'14px',maxWidth:'100%',boxSizing:'border-box'}}>
+       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'8px',flexWrap:'wrap',gap:'6px'}}>
         <strong style={{fontSize:'12px',letterSpacing:'0.3px'}}>DISPATCH SCHEDULE</strong>
         <span className={'badge '+(campaignMsg.sendMode==='schedule'?'':'green')} style={{fontSize:'11px'}}>
          {campaignMsg.sendMode==='schedule'?'QStash Scheduled Delivery':'Immediate Waterfall'}
@@ -319,7 +319,7 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
       </form>
      <div style={{display:'flex',flexDirection:'column',gap:'20px'}}>
       <div className="card">
-       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'12px'}}>
+       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'12px',flexWrap:'wrap',gap:'10px'}}>
         <div>
          <h3 style={{margin:0}}>Recipients</h3>
          <small className="muted">{selectedCampaign.recipients?.length||0} email address{(selectedCampaign.recipients?.length===1)?'':'es'}</small>
@@ -327,7 +327,7 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
         {!editingRecipients&&<button className="secondary" style={{padding:'6px 14px',fontSize:'12px'}} onClick={()=>{setRecipientEditText((selectedCampaign.recipients||[]).join('\n'));setEditingRecipients(true);}}>Edit / Add emails</button>}
        </div>
        {!editingRecipients?(
-        <div style={{maxHeight:'220px',overflowY:'auto',background:'var(--bg)',borderRadius:'8px',padding:'12px',display:'flex',flexWrap:'wrap',gap:'6px'}}>
+        <div style={{maxHeight:'220px',overflowY:'auto',background:'var(--bg)',borderRadius:'8px',padding:'12px',display:'flex',flexWrap:'wrap',gap:'6px',maxWidth:'100%',boxSizing:'border-box',overflowX:'hidden'}}>
          {selectedCampaign.recipients?.map((addr,i)=><span key={i} className="badge recipient-tag">{addr}</span>)}
         </div>
        ):(
@@ -356,16 +356,16 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
           const batchNumber = selectedCampaign.messages.length - idx;
           const stats = m.platform_stats && typeof m.platform_stats === 'object' && Object.keys(m.platform_stats).length > 0 ? m.platform_stats : null;
           return (
-           <div key={m.id} style={{padding:'13px 15px',background:'var(--bg)',borderRadius:'8px',border:'1px solid var(--line)'}}>
-            <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:'8px'}}>
-             <div>
+           <div key={m.id} className="batch-history-card" style={{padding:'13px 14px',background:'var(--bg)',borderRadius:'8px',border:'1px solid var(--line)',maxWidth:'100%',boxSizing:'border-box'}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:'8px',flexWrap:'wrap'}}>
+             <div style={{minWidth:0,flex:'1 1 auto'}}>
               <div style={{display:'flex',alignItems:'center',gap:'6px',flexWrap:'wrap',marginBottom:'4px'}}>
                <span className="badge" style={{fontWeight:'700',fontSize:'10px'}}>Batch #{batchNumber}</span>
                {m.is_follow_up && <span className="badge" style={{background:'#dbeafe',color:'#1e40af',fontSize:'10px'}}>↳ Follow-up</span>}
-               <b style={{fontSize:'13px'}}>{m.subject}</b>
+               <b style={{fontSize:'13px',wordBreak:'break-word',overflowWrap:'anywhere'}}>{m.subject}</b>
               </div>
              </div>
-             <div style={{display:'flex',gap:'6px',alignItems:'center'}}>
+             <div style={{display:'flex',gap:'6px',alignItems:'center',flexShrink:0}}>
               <span className={'badge '+(m.status==='completed'?'green':m.status==='scheduled'?'':m.status==='quota-stopped'?'':m.status==='failed'?'danger':'')}>{m.status}</span>
               {m.status==='scheduled'&&<button type="button" className="link danger" style={{fontSize:'11px'}} onClick={()=>cancelScheduledBroadcast(m.id)}>Cancel</button>}
              </div>
@@ -380,16 +380,16 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
                <span key={plat} className="badge" style={{background:'#fff',border:'1px solid var(--line)',fontSize:'10px',padding:'2px 6px'}}>
                 {count} via {plat}
                </span>
-              ))}
+              )) }
              </div>
             )}
             {m.text_body&&<p style={{fontSize:'12px',color:'var(--muted)',margin:'8px 0 0',maxHeight:'38px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{m.text_body}</p>}
-            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginTop:'12px',paddingTop:'10px',borderTop:'1px dashed var(--line)',flexWrap:'wrap',gap:'8px'}}>
-             <button type="button" className="secondary" style={{padding:'5px 11px',fontSize:'11px'}} onClick={()=>openBatchDetails(m.id)}>
+            <div className="batch-action-row" style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginTop:'12px',paddingTop:'10px',borderTop:'1px dashed var(--line)',flexWrap:'wrap',gap:'8px'}}>
+             <button type="button" className="secondary batch-action-btn" style={{padding:'6px 11px',fontSize:'11px'}} onClick={()=>openBatchDetails(m.id)}>
               📊 View Batch Details
              </button>
              {m.status!=='scheduled'&&(
-              <button type="button" className="secondary" style={{padding:'5px 11px',fontSize:'11px',color:'var(--green)'}} onClick={()=>startFollowUp(m)}>
+              <button type="button" className="secondary batch-action-btn" style={{padding:'6px 11px',fontSize:'11px',color:'var(--green)'}} onClick={()=>startFollowUp(m)}>
                ↩ Send Follow-up
               </button>
              )}
