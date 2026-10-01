@@ -10,6 +10,7 @@ import { domain, email, fail, line, limit, uuid, parseEmailList } from '../../..
 import { messageStore } from '../../../lib/d1.js';
 import { Client as QStashClient, Receiver as QStashReceiver } from '@upstash/qstash';
 import { dispatchCampaignMessage } from '../../../lib/campaign-dispatcher.js';
+import { DEFAULT_TIMEZONE, parseLocalDateTimeInTz, formatDateInTz } from '../../../lib/timezone.js';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
@@ -18,7 +19,7 @@ const clean = html => sanitizeHtml(html || '', { allowedTags: ['p','br','b','str
 async function readBody(req, max = 400000) { const reader = req.body?.getReader(); if (!reader) return ''; let size = 0; const chunks = []; for (; ;) { const { done, value } = await reader.read(); if (done) break; size += value.length; if (size > max) { await reader.cancel(); fail('Message too large', 413); } chunks.push(Buffer.from(value)); } return Buffer.concat(chunks).toString('utf8'); }
 async function authenticated(req) { if (!validSession((await cookies()).get('session')?.value)) fail('Sign in required', 401); }
 
-async function getCapacityForDate(sql, dateObj) {
+async function getCapacityForDate(sql, dateObj, tz = DEFAULT_TIMEZONE) {
     const connections = await sql`SELECT id, provider, daily_limit FROM connections WHERE provider<>'cloudflare' AND enabled=true`;
     if (!connections.length) return 0;
     let totalDailyCapacity = 0;
@@ -28,13 +29,13 @@ async function getCapacityForDate(sql, dateObj) {
             : (providers[c.provider]?.daily || 100000);
         totalDailyCapacity += limitVal;
     }
-    const dateStr = dateObj.toISOString().slice(0, 10);
-    const todayStr = new Date().toISOString().slice(0, 10);
+    const dateStr = formatDateInTz(dateObj, tz);
+    const todayStr = formatDateInTz(new Date(), tz);
     const [scheduledRow] = await sql`
         SELECT COALESCE(SUM(total_recipients), 0)::int as booked
         FROM campaign_messages
         WHERE status IN ('scheduled', 'sending', 'completed')
-          AND scheduled_at::date = ${dateStr}::date
+          AND (scheduled_at AT TIME ZONE ${tz})::date = ${dateStr}::date
     `;
     let booked = scheduledRow?.booked || 0;
     if (dateStr === todayStr) {
@@ -196,10 +197,15 @@ async function handler(req, { params }) {
             await ensureCampaignTables(sql);
             const url = new URL(req.url);
             const now = new Date();
+            const tz = url.searchParams.get('timezone') || process.env.TIMEZONE || DEFAULT_TIMEZONE;
             const year = parseInt(url.searchParams.get('year') || String(now.getFullYear()), 10);
             const month = parseInt(url.searchParams.get('month') || String(now.getMonth() + 1), 10);
-            const startDate = new Date(Date.UTC(year, month - 1, 1));
-            const endDate = new Date(Date.UTC(year, month, 1));
+            
+            const startDate = parseLocalDateTimeInTz(`${year}-${String(month).padStart(2, '0')}-01T00:00:00`, tz);
+            const nextY = month === 12 ? year + 1 : year;
+            const nextM = month === 12 ? 1 : month + 1;
+            const endDate = parseLocalDateTimeInTz(`${nextY}-${String(nextM).padStart(2, '0')}-01T00:00:00`, tz);
+            
             const connections = await sql`SELECT id, provider, daily_limit FROM connections WHERE provider<>'cloudflare' AND enabled=true`;
             let totalDailyCapacity = 0;
             for (const c of connections) {
@@ -230,7 +236,7 @@ async function handler(req, { params }) {
                 };
             }
             for (const b of broadcasts) {
-                const dateKey = new Date(b.scheduled_at).toISOString().slice(0, 10);
+                const dateKey = formatDateInTz(b.scheduled_at, tz);
                 if (daysData[dateKey]) {
                     daysData[dateKey].broadcasts.push(b);
                     if (['scheduled', 'sending', 'completed'].includes(b.status)) {
@@ -244,6 +250,7 @@ async function handler(req, { params }) {
             return json({
                 year,
                 month,
+                timezone: tz,
                 totalDailyCapacity,
                 days: daysData
             });
@@ -471,13 +478,14 @@ async function handler(req, { params }) {
 
             // Is this a scheduled broadcast?
             if (p.scheduledAt) {
-                const scheduledDate = new Date(p.scheduledAt);
-                if (isNaN(scheduledDate.getTime())) fail('Invalid scheduled date/time', 400);
+                const tz = p.timezone || req.headers.get('x-timezone') || process.env.TIMEZONE || DEFAULT_TIMEZONE;
+                const scheduledDate = parseLocalDateTimeInTz(p.scheduledAt, tz);
+                if (!scheduledDate || isNaN(scheduledDate.getTime())) fail('Invalid scheduled date/time', 400);
                 if (scheduledDate.getTime() <= Date.now() + 30000) fail('Scheduled time must be at least 30 seconds in the future', 400);
 
-                const availableForDate = await getCapacityForDate(sql, scheduledDate);
+                const availableForDate = await getCapacityForDate(sql, scheduledDate, tz);
                 if (recipients.length > availableForDate) {
-                    fail(`Cannot schedule campaign: Recipient list has ${recipients.length} emails, but available daily sending capacity for ${scheduledDate.toISOString().slice(0, 10)} is only ${availableForDate}.`, 400);
+                    fail(`Cannot schedule campaign: Recipient list has ${recipients.length} emails, but available daily sending capacity for ${formatDateInTz(scheduledDate, tz)} is only ${availableForDate}.`, 400);
                 }
 
                 const [campaignMsg] = await sql`
@@ -510,13 +518,15 @@ async function handler(req, { params }) {
                     scheduled: true,
                     campaignMessageId: campaignMsg.id,
                     scheduledAt: scheduledDate.toISOString(),
+                    timezone: tz,
                     qstashMessageId: qstashId,
                     total: recipients.length
                 });
             }
 
             // Immediate Send: check today's capacity
-            const availableToday = await getCapacityForDate(sql, new Date());
+            const userTz = p.timezone || req.headers.get('x-timezone') || process.env.TIMEZONE || DEFAULT_TIMEZONE;
+            const availableToday = await getCapacityForDate(sql, new Date(), userTz);
             if (recipients.length > availableToday) {
                 fail(`Cannot send campaign: Recipient list has ${recipients.length} emails, but available daily capacity today is only ${availableToday}.`, 400);
             }

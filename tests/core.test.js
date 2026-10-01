@@ -6,6 +6,7 @@ import {PGlite} from '@electric-sql/pglite';
 import {encrypt,decrypt,session,validSession,signature,inboundOK} from '../lib/security.js';
 import {buildRequest,sendEmail} from '../lib/providers.js';
 import {email,domain,parseEmailList,campaignSlug,matchesCampaign} from '../lib/validation.js';
+import {parseLocalDateTimeInTz,formatDateInTz,toLocalDateStr,toLocalDatetimeInputStr} from '../lib/timezone.js';
 test('credentials store as JSON and decrypt accurately',()=>{const a=encrypt({apiKey:'secret'});assert.deepEqual(decrypt(a),{apiKey:'secret'});});
 test('session validates and expires',()=>{const s=session();assert.ok(validSession(s));assert.ok(!validSession('expired'));});
 
@@ -117,3 +118,24 @@ test('campaignSlug generates clean URL slugs and matchesCampaign matches slugs, 
 });
 
 
+
+test('timezone helpers parse local times and prevent UTC 1-hour delays', () => {
+  // 14:30 local time in Lagos (UTC+1) must equal 13:30:00.000Z in UTC so QStash fires at 14:30 local time (not 15:30)
+  const d1 = parseLocalDateTimeInTz('2026-10-02T14:30', 'Africa/Lagos');
+  assert.equal(d1.toISOString(), '2026-10-02T13:30:00.000Z');
+  assert.equal(formatDateInTz(d1, 'Africa/Lagos'), '2026-10-02');
+
+  // Midnight 00:15 in Lagos is 23:15 UTC of previous day, but local date is 2026-10-02
+  const d2 = parseLocalDateTimeInTz('2026-10-02T00:15', 'Africa/Lagos');
+  assert.equal(d2.toISOString(), '2026-10-01T23:15:00.000Z');
+  assert.equal(formatDateInTz(d2, 'Africa/Lagos'), '2026-10-02');
+
+  // Explicit ISO string with Z preserves instant
+  const d3 = parseLocalDateTimeInTz('2026-10-02T13:30:00.000Z', 'Africa/Lagos');
+  assert.equal(d3.toISOString(), '2026-10-02T13:30:00.000Z');
+
+  // toLocalDateStr produces YYYY-MM-DD
+  assert.match(toLocalDateStr(new Date()), /^\d{4}-\d{2}-\d{2}$/);
+  // toLocalDatetimeInputStr produces YYYY-MM-DDTHH:mm
+  assert.match(toLocalDatetimeInputStr(new Date()), /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/);
+});

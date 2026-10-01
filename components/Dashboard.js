@@ -3,6 +3,7 @@ import {useEffect,useState} from 'react';
 import {useRouter,usePathname} from 'next/navigation';
 import {providers} from '../lib/catalog.js';
 import {parseEmailList, campaignSlug, matchesCampaign} from '../lib/validation.js';
+import {toLocalDatetimeInputStr, toLocalDateStr} from '../lib/timezone.js';
 import {FiTrash2} from 'react-icons/fi';
 const fmt=d=>new Date(d).toLocaleString();
 async function api(path,body){const r=await fetch('/api/'+path,body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const d=await r.json();if(r.status===401){location.href='/login';throw Error('Sign in required');}if(!r.ok&&!(path==='send'&&d.status==='failed'))throw Error(d.error||'Request failed');return d;}
@@ -49,7 +50,7 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
  const [mobileMenuOpen,setMobileMenuOpen]=useState(false);
  const [blacklistForm,setBlacklistForm]=useState({emails:'',reason:'Do Not Contact'});
  const [blacklistSearch,setBlacklistSearch]=useState('');
- async function loadCalendar(year,month){setCalLoading(true);try{const d=await api(`campaigns/calendar?year=${year}&month=${month}`);setCalData(d);}catch(e){setError(e.message);}finally{setCalLoading(false);}}
+ async function loadCalendar(year,month){setCalLoading(true);try{const tz=typeof Intl!=='undefined'?(Intl.DateTimeFormat().resolvedOptions().timeZone||'Africa/Lagos'):'Africa/Lagos';const d=await api(`campaigns/calendar?year=${year}&month=${month}&timezone=${encodeURIComponent(tz)}`);setCalData(d);}catch(e){setError(e.message);}finally{setCalLoading(false);}}
  useEffect(()=>{if(page==='Schedules')loadCalendar(calYear,calMonth);},[page,calYear,calMonth]);
  useEffect(()=>{const t=pathToTab(pathname);if(t&&t!==page)setPage(t);},[pathname]);
  useEffect(()=>{
@@ -136,7 +137,8 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
     personaId:campaignMsg.personaId,
     subject:campaignMsg.subject,
     text:campaignMsg.text,
-    scheduledAt:campaignMsg.sendMode==='schedule'?campaignMsg.scheduledAt:undefined,
+    scheduledAt:campaignMsg.sendMode==='schedule'?(campaignMsg.scheduledAt?new Date(campaignMsg.scheduledAt).toISOString():undefined):undefined,
+    timezone:typeof Intl!=='undefined'?(Intl.DateTimeFormat().resolvedOptions().timeZone||'Africa/Lagos'):'Africa/Lagos',
     isFollowUp:campaignMsg.isFollowUp,
     parentBatchId:campaignMsg.parentBatchId
    });
@@ -302,7 +304,7 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
        {campaignMsg.sendMode==='schedule'&&(
         <div style={{marginTop:'8px',paddingTop:'8px',borderTop:'1px dashed var(--line)'}}>
          <label style={{margin:0,fontSize:'12px'}}>Scheduled Date & Time (Your Local Time)
-          <input type="datetime-local" required={campaignMsg.sendMode==='schedule'} value={campaignMsg.scheduledAt} min={new Date(Date.now()+60000).toISOString().slice(0,16)} onChange={e=>setCampaignMsg({...campaignMsg,scheduledAt:e.target.value})}/>
+          <input type="datetime-local" required={campaignMsg.sendMode==='schedule'} value={campaignMsg.scheduledAt} min={toLocalDatetimeInputStr(Date.now()+60000)} onChange={e=>setCampaignMsg({...campaignMsg,scheduledAt:e.target.value})}/>
          </label>
          <p className="muted" style={{fontSize:'11px',margin:'6px 0 0'}}>
           Checked against daily capacity for that scheduled date. Picked up by DailyScheduler at 2am and triggered at exact time via QStash.
@@ -475,7 +477,7 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
   const daysInMonth=new Date(calYear,calMonth,0).getDate();
   const firstDayOfWeek=new Date(calYear,calMonth-1,1).getDay();
   const prevMonthDays=new Date(calYear,calMonth-1,0).getDate();
-  const todayStr=new Date().toISOString().slice(0,10);
+  const todayStr=toLocalDateStr();
   const monthTitle=`${monthNames[calMonth-1]} ${calYear}`;
 
   function prevMonth(){if(calMonth===1){setCalMonth(12);setCalYear(y=>y-1);}else{setCalMonth(m=>m-1);}}
