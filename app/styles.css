@@ -605,6 +605,49 @@ html, body {
   margin-top: 6px;
   border: 1px solid var(--line);
 }
+.btn-delete {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background: #fef2f2;
+  color: #dc2626;
+  border: 1px solid #fecaca;
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease-in-out;
+  line-height: 1;
+}
+.btn-delete:hover:not(:disabled) {
+  background: #fee2e2;
+  border-color: #fca5a5;
+  color: #b91c1c;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 5px rgba(220, 38, 38, 0.1);
+}
+.btn-delete:active:not(:disabled) {
+  transform: translateY(0);
+}
+.btn-delete:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  border-color: #fee2e2;
+}
+.btn-delete svg {
+  flex-shrink: 0;
+  transition: transform 0.15s ease;
+}
+.btn-delete:hover:not(:disabled) svg {
+  transform: scale(1.1);
+}
+.btn-delete-sm {
+  padding: 4px 8px;
+  font-size: 11px;
+  gap: 4px;
+}
 .batch-modal-stats {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
