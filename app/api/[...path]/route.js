@@ -98,6 +98,7 @@ async function state() {
         dailyCapacity,
         totalDailyCapacity,
         scheduledBroadcasts,
+        blacklist: await sql`SELECT * FROM blacklist ORDER BY created_at DESC`,
         providers
     };
 }
@@ -247,7 +248,12 @@ async function handler(req, { params }) {
                 days: daysData
             });
         }
-        const sql = db();
+        if (req.method === 'GET' && path === 'blacklist') {
+            const sql = db();
+            await ensureCampaignTables(sql);
+            const rows = await sql`SELECT * FROM blacklist ORDER BY created_at DESC`;
+            return json({ blacklist: rows });
+        }
         if (req.method === 'GET' && path === 'messages') {
             const url = new URL(req.url), thread = url.searchParams.get('thread'), folder = url.searchParams.get('folder') === 'sent' ? 'out' : 'in';
             const offset = Math.max(0, Math.min(100000, Number(url.searchParams.get('offset')) || 0));
@@ -348,6 +354,34 @@ async function handler(req, { params }) {
             await messageStore('updateMessage',{id,status:'accepted',provider_id:outcome.providerId,message_id:outcome.messageId});
             return json({ id, status: 'accepted' });
         }
+        if (path === 'blacklist' || path === 'blacklist/delete') {
+            await ensureCampaignTables(sql);
+            if (path === 'blacklist/delete' || p.action === 'delete') {
+                if (p.id) {
+                    const id = uuid(p.id);
+                    await sql`DELETE FROM blacklist WHERE id=${id}`;
+                } else if (p.email) {
+                    const e = email(p.email);
+                    await sql`DELETE FROM blacklist WHERE lower(email)=lower(${e})`;
+                } else {
+                    fail('ID or email required to delete from blacklist', 400);
+                }
+                return json({ ok: true });
+            }
+            const reason = p.reason ? line(p.reason, 'reason', 255) : 'Manual addition';
+            const rawInput = p.emails || p.email || [];
+            const parsedEmails = parseEmailList(rawInput);
+            if (!parsedEmails.length) fail('Please provide at least one valid email to blacklist', 400);
+            for (const e of parsedEmails) {
+                await sql`
+                    INSERT INTO blacklist(email, reason) 
+                    VALUES(${e}, ${reason}) 
+                    ON CONFLICT(email) DO UPDATE SET reason=COALESCE(excluded.reason, blacklist.reason)
+                `;
+            }
+            const updatedList = await sql`SELECT * FROM blacklist ORDER BY created_at DESC`;
+            return json({ ok: true, addedCount: parsedEmails.length, blacklist: updatedList });
+        }
         if (path === 'campaigns' || path === 'campaigns/delete') {
             await ensureCampaignTables(sql);
             if (path === 'campaigns/delete' || p.action === 'delete') {
@@ -360,26 +394,42 @@ async function handler(req, { params }) {
                 const [existing] = await sql`SELECT * FROM campaigns WHERE id=${id}`;
                 if (!existing) fail('Campaign not found', 404);
                 const name = p.name !== undefined ? line(p.name, 'name', 100) : existing.name;
-                const recipients = p.recipients !== undefined ? parseEmailList(p.recipients) : (Array.isArray(existing.recipients) ? existing.recipients : JSON.parse(existing.recipients || '[]'));
+                let recipients = Array.isArray(existing.recipients) ? existing.recipients : JSON.parse(existing.recipients || '[]');
+                let blacklistedFound = [];
                 if (p.recipients !== undefined) {
-                    if (!recipients.length) fail('Please provide at least one valid recipient email address', 400);
+                    const parsed = parseEmailList(p.recipients);
+                    if (!parsed.length) fail('Please provide at least one valid recipient email address', 400);
+                    const blacklistedRows = await sql`SELECT lower(email) AS email FROM blacklist`;
+                    const blacklistedSet = new Set(blacklistedRows.map(r => r.email.toLowerCase()));
+                    blacklistedFound = parsed.filter(e => blacklistedSet.has(e.toLowerCase()));
+                    recipients = parsed.filter(e => !blacklistedSet.has(e.toLowerCase()));
+                    if (!recipients.length) {
+                        fail(`All ${parsed.length} recipient email(s) were excluded because they are in the blacklist.`, 400);
+                    }
                     const available = await getDailyAvailableCapacity(sql);
                     if (recipients.length > available) {
                         fail(`Cannot update campaign: List contains ${recipients.length} emails, but available daily sending capacity across all active platforms is only ${available}. Please increase platform daily limits or reduce list size.`, 400);
                     }
                 }
                 const [updated] = await sql`UPDATE campaigns SET name=${name}, recipients=${JSON.stringify(recipients)}::jsonb WHERE id=${id} RETURNING *`;
-                return json({ ok: true, campaign: updated });
+                return json({ ok: true, campaign: updated, blacklistedRemovedCount: blacklistedFound.length, blacklistedEmails: blacklistedFound });
             }
             const name = line(p.name, 'name', 100);
-            const recipients = parseEmailList(p.recipients || p.emails || []);
-            if (!recipients.length) fail('Please provide at least one valid recipient email address', 400);
+            const parsed = parseEmailList(p.recipients || p.emails || []);
+            if (!parsed.length) fail('Please provide at least one valid recipient email address', 400);
+            const blacklistedRows = await sql`SELECT lower(email) AS email FROM blacklist`;
+            const blacklistedSet = new Set(blacklistedRows.map(r => r.email.toLowerCase()));
+            const blacklistedFound = parsed.filter(e => blacklistedSet.has(e.toLowerCase()));
+            const recipients = parsed.filter(e => !blacklistedSet.has(e.toLowerCase()));
+            if (!recipients.length) {
+                fail(`All ${parsed.length} recipient email(s) were excluded because they are in the blacklist.`, 400);
+            }
             const available = await getDailyAvailableCapacity(sql);
             if (recipients.length > available) {
                 fail(`Cannot create campaign: The list contains ${recipients.length} emails, but the total available daily sending capacity across all active platforms is only ${available}. Please increase your platform limits or reduce the list size.`, 400);
             }
             const [inserted] = await sql`INSERT INTO campaigns(name, recipients) VALUES(${name}, ${JSON.stringify(recipients)}::jsonb) RETURNING *`;
-            return json({ ok: true, campaign: inserted });
+            return json({ ok: true, campaign: inserted, blacklistedRemovedCount: blacklistedFound.length, blacklistedEmails: blacklistedFound });
         }
         if (path === 'campaigns/cancel-schedule') {
             await ensureCampaignTables(sql);

@@ -90,3 +90,18 @@ test('parseEmailList validates, normalizes, deduplicates from various delimiters
  assert.deepEqual(parseEmailList(null), []);
 });
 
+test('blacklist table stores excluded recipients and filters campaign email lists', async () => {
+ const pg = new PGlite();
+ await pg.exec(await readFile(new URL('../db/schema.sql', import.meta.url), 'utf8'));
+ await pg.query("INSERT INTO blacklist(email, reason) VALUES('bad@example.com', 'Unsubscribed')");
+ await pg.query("INSERT INTO blacklist(email, reason) VALUES('spam@example.org', 'Spam complaint')");
+ const rows = (await pg.query("SELECT lower(email) AS email FROM blacklist")).rows;
+ const blacklisted = new Set(rows.map(r => r.email));
+ const inputList = ['good@example.com', 'BAD@example.com', 'spam@example.org', 'another@example.com'];
+ const parsed = parseEmailList(inputList);
+ const filtered = parsed.filter(e => !blacklisted.has(e.toLowerCase()));
+ const removed = parsed.filter(e => blacklisted.has(e.toLowerCase()));
+ assert.deepEqual(filtered, ['good@example.com', 'another@example.com']);
+ assert.deepEqual(removed, ['bad@example.com', 'spam@example.org']);
+});
+

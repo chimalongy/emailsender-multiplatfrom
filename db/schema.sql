@@ -121,4 +121,12 @@ CREATE TABLE IF NOT EXISTS campaign_deliveries (
 CREATE INDEX IF NOT EXISTS idx_campaign_deliveries_batch ON campaign_deliveries(campaign_message_id);
 CREATE INDEX IF NOT EXISTS idx_campaign_deliveries_lookup ON campaign_deliveries(campaign_message_id, recipient);
 
+CREATE TABLE IF NOT EXISTS blacklist (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ email text NOT NULL UNIQUE,
+ reason text,
+ created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_blacklist_email ON blacklist(email);
+
 

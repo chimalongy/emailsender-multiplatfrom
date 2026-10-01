@@ -13,6 +13,7 @@ export default function Dashboard({initialTab='Overview'}){
   if(!p)return null;
   const s=p.replace(/^\//,'').split('/')[0].toLowerCase();
   if(s==='campaigns')return 'Campaigns';
+  if(s==='blacklist')return 'Blacklist';
   if(s==='schedules')return 'Schedules';
   if(s==='connected'||s==='connections')return 'Connected';
   if(s==='personas')return 'Personas';
@@ -25,6 +26,7 @@ export default function Dashboard({initialTab='Overview'}){
  const tabToPath={
   Overview:'/',
   Campaigns:'/campaigns',
+  Blacklist:'/blacklist',
   Schedules:'/schedules',
   Connected:'/connected',
   Personas:'/personas',
@@ -32,7 +34,7 @@ export default function Dashboard({initialTab='Overview'}){
   Mailbox:'/mailbox',
   Deployment:'/deployment'
  };
- const [page,setPage]=useState(initialTab||pathToTab(pathname)||'Overview'),[connectedTab,setConnectedTab]=useState('capacity'),[data,setData]=useState({connections:[],personas:[],campaigns:[]}),[error,setError]=useState(''),[notice,setNotice]=useState(''),[busy,setBusy]=useState(false),[loading,setLoading]=useState(true);
+ const [page,setPage]=useState(initialTab||pathToTab(pathname)||'Overview'),[connectedTab,setConnectedTab]=useState('capacity'),[data,setData]=useState({connections:[],personas:[],campaigns:[],blacklist:[]}),[error,setError]=useState(''),[notice,setNotice]=useState(''),[busy,setBusy]=useState(false),[loading,setLoading]=useState(true);
  const [connection,setConnection]=useState(initialConnection('brevo')),[inspect,setInspect]=useState(null),[persona,setPersona]=useState({name:'',email:''});
  const [compose,setCompose]=useState({id:'',personaId:'',connectionId:'',to:'',subject:'',text:'',parentId:null}),[folder,setFolder]=useState('inbox'),[offset,setOffset]=useState(0),[messages,setMessages]=useState([]),[thread,setThread]=useState([]);
  const [selectedCampaignId,setSelectedCampaignId]=useState(null),[campaignForm,setCampaignForm]=useState({name:'',emails:''}),[campaignMsg,setCampaignMsg]=useState({personaId:'',subject:'',text:'',sendMode:'now',scheduledAt:'',isFollowUp:false,parentBatchId:null}),[editingRecipients,setEditingRecipients]=useState(false),[recipientEditText,setRecipientEditText]=useState('');
@@ -44,6 +46,8 @@ export default function Dashboard({initialTab='Overview'}){
  const [selectedCalDay,setSelectedCalDay]=useState(null);
  const [calView,setCalView]=useState('grid');
  const [mobileMenuOpen,setMobileMenuOpen]=useState(false);
+ const [blacklistForm,setBlacklistForm]=useState({emails:'',reason:'Do Not Contact'});
+ const [blacklistSearch,setBlacklistSearch]=useState('');
  async function loadCalendar(year,month){setCalLoading(true);try{const d=await api(`campaigns/calendar?year=${year}&month=${month}`);setCalData(d);}catch(e){setError(e.message);}finally{setCalLoading(false);}}
  useEffect(()=>{if(page==='Schedules')loadCalendar(calYear,calMonth);},[page,calYear,calMonth]);
  useEffect(()=>{const t=pathToTab(pathname);if(t&&t!==page)setPage(t);},[pathname]);
@@ -92,9 +96,11 @@ export default function Dashboard({initialTab='Overview'}){
  const campaignSelectedDomain=campaignSelectedPersona?campaignSelectedPersona.email.split('@')[1]:null;
  const campaignEligiblePlatforms=campaignSelectedDomain?activeSenders.filter(c=>c.domains.includes(campaignSelectedDomain)):activeSenders;
  const campaignEligibleCapacity=campaignEligiblePlatforms.reduce((n,c)=>n+Math.max(0,getDailyLimit(c)-getDailySent(c)),0);
- async function createCampaign(e){e.preventDefault();const parsed=parseEmailList(campaignForm.emails);if(!parsed.length){setError('Please enter at least one valid recipient email address.');return;}if(parsed.length>availableDailyCapacity){setError(`Cannot create campaign: The recipient list contains ${parsed.length} emails, but the total available daily sending capacity across all active platforms is only ${availableDailyCapacity}. Please increase platform limits or reduce your recipient list.`);return;}await run(async()=>{const res=await api('campaigns',{name:campaignForm.name,recipients:parsed});await refresh();setCampaignForm({name:'',emails:''});setNotice(`Campaign "${campaignForm.name}" created with ${parsed.length} recipient${parsed.length===1?'':'s'}.`);if(res.campaign?.id){setSelectedCampaignId(res.campaign.id);setRecipientEditText((res.campaign.recipients||[]).join('\n'));}});}
+ async function createCampaign(e){e.preventDefault();const parsed=parseEmailList(campaignForm.emails);if(!parsed.length){setError('Please enter at least one valid recipient email address.');return;}if(parsed.length>availableDailyCapacity){setError(`Cannot create campaign: The recipient list contains ${parsed.length} emails, but the total available daily sending capacity across all active platforms is only ${availableDailyCapacity}. Please increase platform limits or reduce your recipient list.`);return;}await run(async()=>{const res=await api('campaigns',{name:campaignForm.name,recipients:parsed});await refresh();setCampaignForm({name:'',emails:''});const removedMsg=res.blacklistedRemovedCount?` (${res.blacklistedRemovedCount} blacklisted email${res.blacklistedRemovedCount===1?' was':'s were'} automatically removed)`:'';setNotice(`Campaign "${campaignForm.name}" created with ${res.campaign?.recipients?.length||parsed.length} recipient${(res.campaign?.recipients?.length||parsed.length)===1?'':'s'}${removedMsg}.`);if(res.campaign?.id){setSelectedCampaignId(res.campaign.id);setRecipientEditText((res.campaign.recipients||[]).join('\n'));}});}
  async function deleteCampaign(c){if(!confirm(`Delete campaign "${c.name}"? This will also remove its campaign message history.`))return;await run(async()=>{await api('campaigns',{action:'delete',id:c.id});if(selectedCampaignId===c.id)setSelectedCampaignId(null);await refresh();setNotice(`Campaign "${c.name}" deleted.`);});}
- async function saveRecipients(c){const parsed=parseEmailList(recipientEditText);if(!parsed.length){setError('Please enter at least one valid recipient email address.');return;}if(parsed.length>availableDailyCapacity){setError(`Cannot update campaign: Recipient list has ${parsed.length} emails, but available daily sending capacity across all active platforms is only ${availableDailyCapacity}.`);return;}await run(async()=>{await api('campaigns',{action:'update',id:c.id,recipients:parsed});await refresh();setEditingRecipients(false);setNotice(`Updated "${c.name}" with ${parsed.length} recipient${parsed.length===1?'':'s'}.`);});}
+ async function saveRecipients(c){const parsed=parseEmailList(recipientEditText);if(!parsed.length){setError('Please enter at least one valid recipient email address.');return;}if(parsed.length>availableDailyCapacity){setError(`Cannot update campaign: Recipient list has ${parsed.length} emails, but available daily sending capacity across all active platforms is only ${availableDailyCapacity}.`);return;}await run(async()=>{const res=await api('campaigns',{action:'update',id:c.id,recipients:parsed});await refresh();setEditingRecipients(false);const removedMsg=res.blacklistedRemovedCount?` (${res.blacklistedRemovedCount} blacklisted email${res.blacklistedRemovedCount===1?' was':'s were'} automatically removed)`:'';setNotice(`Updated "${c.name}" with ${res.campaign?.recipients?.length||parsed.length} recipient${(res.campaign?.recipients?.length||parsed.length)===1?'':'s'}${removedMsg}.`);});}
+ async function addToBlacklist(e){e.preventDefault();const parsed=parseEmailList(blacklistForm.emails);if(!parsed.length){setError('Please enter at least one valid email address.');return;}await run(async()=>{const res=await api('blacklist',{emails:parsed,reason:blacklistForm.reason});await refresh();setBlacklistForm(f=>({...f,emails:''}));setNotice(`Added ${res.addedCount||parsed.length} email${(res.addedCount||parsed.length)===1?'':'s'} to the blacklist.`);});}
+ async function removeFromBlacklist(b){if(!confirm(`Remove "${b.email}" from the blacklist?`))return;await run(async()=>{await api('blacklist',{action:'delete',id:b.id});await refresh();setNotice(`Removed "${b.email}" from the blacklist.`);});}
  async function sendCampaignBroadcast(e){
   e.preventDefault();
   if(!selectedCampaign||!selectedCampaign.recipients?.length){setError('No recipients found in this campaign.');return;}
@@ -173,10 +179,10 @@ export default function Dashboard({initialTab='Overview'}){
     </div>
     <div className="sidebar-content">
      <p className="navlabel">WORKSPACE</p>
-     <nav>{[['Overview','◫'],['Campaigns','📢'],['Schedules','📅'],['Connected','⇄'],['Personas','◎'],['Compose','↗'],['Mailbox','▤'],['Deployment','⌘']].map(([p,icon])=><button key={p} className={(page===p||(p==='Connected'&&page==='Connections'))?'active':''} onClick={()=>{if(p==='Connected')setConnectedTab('capacity');if(p==='Campaigns')setSelectedCampaignId(null);if(p==='Schedules')setSelectedCalDay(null);navigate(p);}}><span>{icon}</span>{p}{p==='Connected'&&<small>{senders.length}</small>}{p==='Campaigns'&&<small>{(data.campaigns||[]).length}</small>}{p==='Schedules'&&<small>{(data.scheduledBroadcasts||[]).length}</small>}</button>)}</nav>
+     <nav>{[['Overview','◫'],['Campaigns','📢'],['Blacklist','⊘'],['Schedules','📅'],['Connected','⇄'],['Personas','◎'],['Compose','↗'],['Mailbox','▤'],['Deployment','⌘']].map(([p,icon])=><button key={p} className={(page===p||(p==='Connected'&&page==='Connections'))?'active':''} onClick={()=>{if(p==='Connected')setConnectedTab('capacity');if(p==='Campaigns')setSelectedCampaignId(null);if(p==='Schedules')setSelectedCalDay(null);navigate(p);}}><span>{icon}</span>{p}{p==='Connected'&&<small>{senders.length}</small>}{p==='Campaigns'&&<small>{(data.campaigns||[]).length}</small>}{p==='Blacklist'&&<small>{(data.blacklist||[]).length}</small>}{p==='Schedules'&&<small>{(data.scheduledBroadcasts||[]).length}</small>}</button>)}</nav>
      <div className="sidebarfoot"><span className="dot"/>Private workspace<p>Vercel · Neon · Cloudflare</p><button className="link" onClick={()=>run(async()=>{await api('logout',{});location.href='/login';})}>Sign out</button></div>
     </div>
-   </aside><main><header><div><p className="eyebrow">EMAIL WORKSPACE / {(page==='Connections'?'CONNECTED':page).toUpperCase()}</p><h1>{({Overview:'Your mail, connected.',Campaigns:'Targeted email broadcasts.',Schedules:'Planned dispatches & calendar capacity.',Connected:'Platform capacity and usage.',Connections:'Connect your platforms.',Personas:'Choose who you send as.',Compose:'A new conversation.',Mailbox:'Your conversations.',Deployment:'Ready to go live.'})[page]}</h1></div><button onClick={()=>navigate('Compose')}>+ Compose email</button></header>{error&&<div role="alert" className="alert error">{error}</div>}{notice&&<div role="status" className="alert success">{notice}</div>}{loading&&<p className="muted">Loading your workspace…</p>}
+   </aside><main><header><div><p className="eyebrow">EMAIL WORKSPACE / {(page==='Connections'?'CONNECTED':page).toUpperCase()}</p><h1>{({Overview:'Your mail, connected.',Campaigns:'Targeted email broadcasts.',Blacklist:'Excluded recipients & protection.',Schedules:'Planned dispatches & calendar capacity.',Connected:'Platform capacity and usage.',Connections:'Connect your platforms.',Personas:'Choose who you send as.',Compose:'A new conversation.',Mailbox:'Your conversations.',Deployment:'Ready to go live.'})[page]}</h1></div><button onClick={()=>navigate('Compose')}>+ Compose email</button></header>{error&&<div role="alert" className="alert error">{error}</div>}{notice&&<div role="status" className="alert success">{notice}</div>}{loading&&<p className="muted">Loading your workspace…</p>}
  {page==='Overview'&&<><section className="stats"><div className="card"><p>Daily sent / Capacity</p><strong>{totalDailySent.toLocaleString()}<small> / {totalDailyCapacity>0?totalDailyCapacity.toLocaleString():'No limit'}</small></strong><progress max={totalDailyCapacity||1} value={totalDailyCapacity?totalDailySent:0}/><div style={{display:'flex',justifyContent:'space-between',fontSize:'11px',color:'var(--muted)',marginTop:'6px'}}><span>{totalDailyCapacity>0?`${Math.max(0,totalDailyCapacity-totalDailySent).toLocaleString()} remaining today`:'No daily cap'}</span><span>{dailyPercent}% used</span></div>{senders.length>0&&activeSenders.length!==senders.length&&<small style={{display:'block',marginTop:'5px',color:'#b07d12'}}>{activeDailyCapacity.toLocaleString()} active capacity ({activeSenders.length}/{senders.length} enabled)</small>}</div><div className="card"><p>Monthly sent / Capacity</p><strong>{totalMonthlySent.toLocaleString()}<small> / {totalMonthlyCapacity>0?totalMonthlyCapacity.toLocaleString():'No limit'}</small></strong><progress max={totalMonthlyCapacity||1} value={totalMonthlyCapacity?totalMonthlySent:0}/><div style={{display:'flex',justifyContent:'space-between',fontSize:'11px',color:'var(--muted)',marginTop:'6px'}}><span>{totalMonthlyCapacity>0?`${Math.max(0,totalMonthlyCapacity-totalMonthlySent).toLocaleString()} remaining`:'No monthly cap'}</span><span>{monthlyPercent}% used</span></div>{senders.length>0&&activeSenders.length!==senders.length&&<small style={{display:'block',marginTop:'5px',color:'#b07d12'}}>{activeMonthlyCapacity.toLocaleString()} active capacity ({activeSenders.length}/{senders.length} enabled)</small>}</div><div className="card"><p>Connected platforms</p><strong>{activeSenders.length}<small> / {senders.length} active</small></strong><p style={{fontSize:'12px',color:'var(--muted)',margin:'10px 0 10px'}}>{data.personas.length} persona{data.personas.length===1?'':'s'} configured</p><button className="link" onClick={()=>{setConnectedTab('capacity');navigate('Connected');}}>View platform details →</button></div></section><div className="sectiontitle"><div><h2>Sending capacity overview</h2><p className="muted">Combined sending quota calculated across your connected platforms.</p></div><div style={{display:'flex',gap:'10px'}}><button className="secondary" onClick={()=>run(refresh)}>Refresh</button><button onClick={()=>{setConnectedTab('capacity');navigate('Connected');}}>View Connected Page →</button></div></div>{!senders.length?<div className="empty card"><div className="emptyicon">⇄</div><h2>Your first connection starts here.</h2><p>Add a sending provider, verify your domain, then create your persona.</p><button onClick={()=>{setConnectedTab('settings');navigate('Connected');}}>Connect a platform →</button></div>:<div className="card" style={{padding:'24px'}}><div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',flexWrap:'wrap',gap:'16px',marginBottom:'20px'}}><div><h3 style={{fontSize:'17px',marginBottom:'4px'}}>Platforms Capacity Breakdown</h3><p className="muted" style={{margin:0}}>{senders.length} connected platform{senders.length===1?'':'s'} ({activeSenders.length} active) providing {totalDailyCapacity.toLocaleString()} daily and {totalMonthlyCapacity.toLocaleString()} monthly sending capacity.</p></div><button className="link" onClick={()=>{setConnectedTab('capacity');navigate('Connected');}}>Full platform meters & reset schedules →</button></div><div style={{display:'grid',gap:'10px'}}>{senders.map(c=>{const dUsed=getDailySent(c),dLimit=getDailyLimit(c),mUsed=getMonthlySent(c),mLimit=getMonthlyLimit(c);return <div key={c.id} style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'12px 16px',background:'var(--bg)',borderRadius:'8px',gap:'16px',flexWrap:'wrap'}}><div style={{display:'flex',alignItems:'center',gap:'10px',minWidth:'170px'}}><div><b style={{fontSize:'14px',display:'block'}}>{c.label}</b><span className="muted" style={{fontSize:'11px'}}>{c.domains.join(', ')}</span></div><span className={'badge '+(c.enabled?'green':'')} style={{marginLeft:'auto'}}>{c.enabled?'Enabled':'Paused'}</span></div><div style={{display:'flex',gap:'20px',fontSize:'12px',alignItems:'center'}}><div><span className="muted" style={{fontSize:'10px',display:'block',textTransform:'uppercase',letterSpacing:'0.5px'}}>Daily allowance</span><b>{dUsed} / {dLimit||'No cap'}</b></div><div><span className="muted" style={{fontSize:'10px',display:'block',textTransform:'uppercase',letterSpacing:'0.5px'}}>Monthly allowance</span><b>{mUsed} / {mLimit||'No cap'}</b></div></div><button className="link" style={{fontSize:'12px'}} onClick={()=>edit(c)}>Manage settings →</button></div>;})}</div><p className="footnote" style={{marginTop:'18px'}}>Quotas are shared by every persona. Provider approval, external usage, hourly limits and actual billing periods may reduce available capacity. For detailed per-platform usage meters and reset timestamps, visit the <button className="link" style={{display:'inline',padding:0,fontSize:'inherit'}} onClick={()=>{setConnectedTab('capacity');navigate('Connected');}}>Connected page</button>.</p></div>}</>}
  {page==='Campaigns'&&<>
   {selectedCampaign?(
@@ -647,6 +653,94 @@ export default function Dashboard({initialTab='Overview'}){
  {page==='Compose'&&<form className="card form composer" onSubmit={e=>{e.preventDefault();run(async()=>{const id=compose.id||crypto.randomUUID();setCompose(c=>({...c,id}));const r=await api('send',{...compose,id});await refresh();if(r.status==='accepted'){setNotice('Accepted by the provider. Saved in Sent.');setCompose(c=>({...c,id:crypto.randomUUID(),text:'',subject:'',parentId:null}));}else {setCompose(c=>({...c,id:crypto.randomUUID()}));setNotice(`Status: ${r.status}. ${r.status==='failed'?'Correct the provider issue before retrying.':'Check Sent and provider logs before trying again.'} ${r.error||''}`);}});}}><div className="row"><label>Sender persona<select required value={compose.personaId} onChange={e=>setCompose({...compose,personaId:e.target.value})}><option value="">Choose a persona</option>{data.personas.map(p=><option value={p.id} key={p.id}>{p.name} — {p.email}</option>)}</select></label><label>Sending platform<select required value={compose.connectionId} onChange={e=>setCompose({...compose,connectionId:e.target.value})}><option value="">Choose a platform</option>{senders.map(c=><option key={c.id} value={c.id} disabled={!c.enabled||!!selectedPersona&&!c.domains.includes(selectedPersona.email.split('@')[1])}>{c.label}{!c.enabled?' — paused':selectedPersona&&!c.domains.includes(selectedPersona.email.split('@')[1])?' — verify domain':''}</option>)}</select></label></div>{(()=>{const sel=senders.find(c=>c.id===compose.connectionId)?.provider;if(sel==='sequenzy')return <div className="hint">Sequenzy does not support custom threading headers. Your app retains the reply relationship via unique Reply-To, but the recipient’s mail client may show a separate conversation.</div>;if(sel==='senddev')return <div className="hint">Send.dev does not support custom email headers. Your app retains the reply relationship via unique Reply-To, but the recipient’s mail client may show a separate conversation.</div>;return null;})()}<label>To<input type="email" required value={compose.to} onChange={e=>setCompose({...compose,to:e.target.value})} placeholder="recipient@example.com"/></label><label>Subject<input required maxLength="255" value={compose.subject} onChange={e=>setCompose({...compose,subject:e.target.value})} placeholder="What would you like to say?"/></label><label>Message<textarea required rows="14" maxLength="100000" value={compose.text} onChange={e=>setCompose({...compose,text:e.target.value})} placeholder="Write your message…"/></label><div className="composerfoot"><button type="button" className="secondary" disabled={busy} onClick={()=>setCompose(c=>({...c,id:crypto.randomUUID(),to:'',subject:'',text:'',parentId:null}))}>New message</button><p className="muted">One recipient per send · Saved to Sent automatically</p><button disabled={busy}>{busy?'Sending…':'Send email ↗'}</button></div></form>}
  {page==='Mailbox'&&<><div className="sectiontitle"><div className="tabs">{['inbox','sent'].map(f=><button className={folder===f?'selected':''} key={f} onClick={()=>{setFolder(f);setOffset(0);setThread([]);}}>{f==='inbox'?'Inbox':'Sent'}</button>)}</div><button className="secondary" onClick={()=>run(async()=>setMessages(await api(`messages?folder=${folder}&offset=${offset}`)))}>Refresh</button></div><div className="mailcolumns"><section className="card maillist">{messages.map(m=><button key={m.id} onClick={()=>openThread(m.thread_id)} className="mailrow"><div><b>{folder==='sent'?m.to_email:m.from_email}</b><time>{new Date(m.created_at).toLocaleDateString()}</time></div><p>{m.subject}</p><span className="badge">{m.status}</span></button>)}{!messages.length&&<div className="empty"><h3>No messages here yet.</h3><p>Incoming and outgoing messages will appear here.</p></div>}<div className="row pager"><button className="secondary" disabled={!offset} onClick={()=>setOffset(Math.max(0,offset-50))}>Previous</button><button className="secondary" disabled={messages.length<50} onClick={()=>setOffset(offset+50)}>Next</button></div></section><section>{!thread.length?<div className="empty card"><div className="emptyicon">▤</div><h2>Select a conversation</h2><p>Read messages and send replies from any platform.</p></div>:thread.map(m=><article className="card message" key={m.id}><div className="cardtitle"><h3>{m.subject}</h3><span className="badge">{m.status}</span></div><p><b>{m.from_name||m.from_email}</b> → {m.to_email}</p><small>{fmt(m.created_at)}</small>{m.text_body?<div className="messagebody">{m.text_body}</div>:<iframe title="Email content" sandbox="" referrerPolicy="no-referrer" srcDoc={'<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'unsafe-inline\'"><style>body{font:15px system-ui;line-height:1.6}</style>'+m.html_body}/>} {!!m.headers?.attachmentsOmitted&&<p className="hint">{m.headers.attachmentsOmitted} attachment(s) omitted in this text-only version.</p>}{m.error&&<p className="error">{m.error}</p>}<div className="row">{m.direction==='in'&&<button onClick={()=>reply(m)}>Reply ↗</button>}<details><summary>Message details</summary><p className="mono">ID: {m.id}</p><p className="mono">Wire Message-ID: {m.message_id||'Not provided by API'}</p><p className="mono">Provider ID: {m.provider_id||'—'}</p>{m.direction==='in'&&<form onSubmit={e=>{e.preventDefault();const target=new FormData(e.target).get('target');run(async()=>{await api('link',{id:m.id,target});setThread([]);setNotice('Message linked to the selected conversation.');});}}><label>Link to outgoing message ID<input name="target" required placeholder="Paste the outgoing message UUID"/></label><button disabled={busy} className="secondary">Link conversation</button></form>}{['sending','unknown'].includes(m.status)&&<form onSubmit={e=>{e.preventDefault();const values=Object.fromEntries(new FormData(e.target));run(async()=>{await api('reconcile',{id:m.id,...values});setThread(await api('messages?thread='+m.thread_id));await refresh();});}}><p>First verify the outcome in your provider logs. Confirmed failures release reserved capacity.</p><select name="status"><option value="accepted">Provider accepted it</option><option value="failed">Provider confirms it was not sent</option></select><label>Provider ID<input name="providerId"/></label><label>Wire Message-ID (if known)<input name="messageId"/></label><button disabled={busy}>Save confirmed outcome</button></form>}</details></div></article>)}</section></div></>}
  {page==='Deployment'&&<section className="card form deployment"><p className="eyebrow">SERVERLESS SETUP</p><h2>From project to inbox.</h2><ol><li><b>Create Neon and D1.</b><p>Run <code>db/schema.sql</code> in Neon. Create a D1 database and run <code>db/d1-messages.sql</code> remotely. Message rows are stored in D1; other application data remains in Neon.</p></li><li><b>Deploy the Worker.</b><p>Set your D1 database ID in <code>worker/wrangler.jsonc</code>, deploy the Worker and save INBOUND_SECRET with Wrangler. The Worker handles incoming mail and serves the signed D1 API.</p></li><li><b>Deploy on Vercel.</b><p>Set DATABASE_URL, MESSAGE_STORE_URL (Worker URL plus <code>/api/messages</code>), APP_URL, ADMIN_PASSWORD_HASH, SESSION_SECRET, CREDENTIALS_KEY and INBOUND_SECRET. The secret must match the Worker. Redeploy after setting variables.</p></li><li><b>Connect providers and routes.</b><p>Publish provider DNS records. Keep Cloudflare's receiving MX records. Route persona addresses and a catch-all for <code>reply+…</code> addresses to the deployed Worker. Add and enable the domain in Connections.</p></li><li><b>Test the round trip.</b><p>Send to an address you control, reply, then open Inbox. Configure optional Resend/Mailgun delivery webhooks and save their signing secrets.</p></li></ol><div className="hint">Message bodies and status live in D1. Attachments are not retained in this text/HTML version. Read README.md and docs/CLOUDFLARE.md for deployment steps.</div><details><summary>View complete Worker code</summary><WorkerCode/></details></section>}
+ {page==='Blacklist'&&<div className="columns">
+  <section>
+   <div className="sectiontitle">
+    <div>
+     <h2>Blacklisted recipients</h2>
+     <p className="muted" style={{margin:'2px 0 0',fontSize:'13px'}}>Addresses here are protected and will be automatically removed from campaign recipient lists.</p>
+    </div>
+   </div>
+   <div style={{display:'flex',gap:'10px',alignItems:'center',marginBottom:'16px',flexWrap:'wrap'}}>
+    <input
+     type="search"
+     placeholder="Filter blacklist by email or reason…"
+     value={blacklistSearch}
+     onChange={e=>setBlacklistSearch(e.target.value)}
+     style={{flex:1,minWidth:'220px',padding:'8px 12px'}}
+    />
+    <span className="badge" style={{background:'#fef3c7',color:'#92400e',border:'1px solid #fde68a'}}>
+     🛡️ Auto-Filtering Active
+    </span>
+   </div>
+   {!(data.blacklist||[]).length?(
+    <div className="empty card">
+     <div className="emptyicon">⊘</div>
+     <h2>No blacklisted emails yet.</h2>
+     <p>Add emails manually or in bulk to exclude them from all campaign dispatches.</p>
+    </div>
+   ):(
+    <div className="card" style={{padding:0,overflow:'hidden'}}>
+     <div style={{overflowX:'auto'}}>
+      <table className="delivery-table" style={{width:'100%',margin:0,borderCollapse:'collapse'}}>
+       <thead>
+        <tr style={{background:'var(--bg)',borderBottom:'1px solid var(--line)'}}>
+         <th style={{padding:'10px 14px',textAlign:'left'}}>Email Address</th>
+         <th style={{padding:'10px 14px',textAlign:'left'}}>Reason / Tag</th>
+         <th style={{padding:'10px 14px',textAlign:'left'}}>Date Added</th>
+         <th style={{padding:'10px 14px',textAlign:'right'}}>Actions</th>
+        </tr>
+       </thead>
+       <tbody>
+        {(data.blacklist||[])
+         .filter(b=>!blacklistSearch||b.email.toLowerCase().includes(blacklistSearch.toLowerCase())||(b.reason||'').toLowerCase().includes(blacklistSearch.toLowerCase()))
+         .map(b=>(
+          <tr key={b.id} style={{borderBottom:'1px solid var(--line)'}}>
+           <td style={{padding:'10px 14px'}}><b style={{fontSize:'13px'}}>{b.email}</b></td>
+           <td style={{padding:'10px 14px'}}><span className="badge" style={{fontSize:'11px',background:'#f1f5f9',color:'#475569'}}>{b.reason||'Manual addition'}</span></td>
+           <td style={{padding:'10px 14px',fontSize:'12px',color:'var(--muted)',whiteSpace:'nowrap'}}>{fmt(b.created_at)}</td>
+           <td style={{padding:'10px 14px',textAlign:'right'}}><button type="button" className="link danger" disabled={busy} onClick={()=>removeFromBlacklist(b)} style={{fontSize:'12px',padding:'4px 8px'}}>Remove</button></td>
+          </tr>
+         ))}
+        {!(data.blacklist||[]).filter(b=>!blacklistSearch||b.email.toLowerCase().includes(blacklistSearch.toLowerCase())||(b.reason||'').toLowerCase().includes(blacklistSearch.toLowerCase())).length&&(
+         <tr><td colSpan="4" style={{padding:'24px',textAlign:'center',color:'var(--muted)'}}>No blacklisted emails match &quot;{blacklistSearch}&quot;.</td></tr>
+        )}
+       </tbody>
+      </table>
+     </div>
+    </div>
+   )}
+  </section>
+  <form className="card form" onSubmit={addToBlacklist}>
+   <h2>Add to Blacklist</h2>
+   <p className="muted" style={{fontSize:'12px',marginBottom:'14px'}}>Paste a single email or multiple emails separated by newlines, commas, or semicolons.</p>
+   <label>
+    Email address(es)
+    <textarea
+     required
+     rows="6"
+     placeholder={"user1@example.com\nuser2@example.com, user3@example.com"}
+     value={blacklistForm.emails}
+     onChange={e=>setBlacklistForm(f=>({...f,emails:e.target.value}))}
+     style={{fontFamily:'monospace',fontSize:'13px'}}
+    />
+   </label>
+   <label>
+    Reason / Category
+    <select value={blacklistForm.reason} onChange={e=>setBlacklistForm(f=>({...f,reason:e.target.value}))}>
+     <option value="Do Not Contact">Do Not Contact</option>
+     <option value="Unsubscribed">Unsubscribed</option>
+     <option value="Bounced / Invalid">Bounced / Invalid</option>
+     <option value="Spam Complaint">Spam Complaint</option>
+     <option value="Manual addition">Manual addition</option>
+    </select>
+   </label>
+   <div className="hint" style={{marginTop:'10px'}}>
+    <b>Automatic Protection:</b> Whenever you paste a recipient list into any campaign, the system automatically checks this blacklist and removes every matching address before saving.
+   </div>
+   <button disabled={busy} style={{marginTop:'12px'}}>{busy?'Saving…':'Add to Blacklist ⊘'}</button>
+  </form>
+ </div>}
 
   {batchDetailsLoading && (
    <div className="modal-overlay">
