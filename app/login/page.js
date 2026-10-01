@@ -29,7 +29,7 @@ export default function Login() {
 
   return (
     <main className="login">
-      <form onSubmit={submit} className="card">
+      <form onSubmit={submit} className="card login-card">
         <div className="brandmark">E</div>
         <p className="eyebrow">YOUR EMAIL WORKSPACE</p>
         <h1>Welcome back.</h1>
