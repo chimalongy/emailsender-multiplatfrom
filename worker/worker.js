@@ -19,6 +19,44 @@ async function inbound(env,p){
  await env.MESSAGES.prepare("INSERT OR IGNORE INTO messages(id,direction,persona_id,thread_id,parent_id,from_email,from_name,to_email,subject,text_body,html_body,headers,message_id,status,dedupe_key,created_at) VALUES(?,'in',?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
  .bind(id,parent?.persona_id||null,parent?.thread_id||id,parent?.id||null,from,String(p.fromName||"").slice(0,200),to,String(p.subject||"(No subject)").slice(0,255),String(p.text||"").slice(0,150000),String(p.html||"").slice(0,150000),JSON.stringify(meta),String(p.messageId||"").slice(0,300)||null,"received",String(p.dedupeKey||""),iso()).run();
 }
+async function notifyNtfy(env,m,message){
+ if(!env.NTFY_TOPIC)return;
+ try{
+  const senderEmail=m.from?.address||message.from;
+  const senderName=m.from?.name?`${m.from.name} (${senderEmail})`:senderEmail;
+  const appUrl=(env.APP_URL||"https://emailsender-multiplatfrom.vercel.app").replace(/\/$/,"");
+  const mailboxUrl=`${appUrl}/mailbox`;
+  const subject=m.subject||"(No subject)";
+  const preview=String(m.text||"").trim().slice(0,180)||"(No preview text)";
+  const replySubject=encodeURIComponent("Re: "+subject.replace(/^re:\s*/i,""));
+  await fetch("https://ntfy.sh",{
+   method:"POST",
+   headers:{"Content-Type":"application/json"},
+   body:JSON.stringify({
+    topic:env.NTFY_TOPIC,
+    title:`✉️ New email from ${senderName}`,
+    message:`To: ${message.to}\nSubject: ${subject}\n\n${preview}`,
+    priority:4,
+    tags:["email","incoming_envelope"],
+    click:mailboxUrl,
+    actions:[
+     {
+      action:"view",
+      label:"📂 Open Mailbox",
+      url:mailboxUrl
+     },
+     {
+      action:"view",
+      label:"↩️ Quick Reply",
+      url:`mailto:${senderEmail}?subject=${replySubject}`
+     }
+    ]
+   })
+  });
+ }catch(err){
+  console.error("Push notification failed:",err?.message||err);
+ }
+}
 async function action(env,p){
  const d=env.MESSAGES;
  switch(p.action){
@@ -45,6 +83,7 @@ export default{
   try{const raw=await new Response(message.raw).arrayBuffer(),m=await PostalMime.parse(raw);if((m.text||"").length>150000||(m.html||"").length>150000)return message.setReject("Message body exceeds mailbox limit");
    const digest=hex(await crypto.subtle.digest("SHA-256",raw)),dedupeKey=hex(await crypto.subtle.digest("SHA-256",enc.encode(digest+":"+message.to.toLowerCase())));
    await inbound(env,{envelopeFrom:message.from,envelopeTo:message.to,from:m.from?.address||message.from,fromName:m.from?.name||"",replyTo:m.replyTo?.[0]?.address||null,subject:m.subject||"",text:m.text||"",html:m.html||"",messageId:m.messageId||message.headers.get("message-id")||"",inReplyTo:message.headers.get("in-reply-to")||"",references:message.headers.get("references")||"",attachmentsOmitted:m.attachments?.length||0,dedupeKey});
+   await notifyNtfy(env,m,message);
   }catch(e){console.error("Inbound D1 write failed",e?.message);message.setReject("Mailbox could not store this message; please contact the recipient")}
  }
 };

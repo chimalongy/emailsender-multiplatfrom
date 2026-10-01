@@ -12,6 +12,8 @@
     }
   ],
   "vars": {
-    "ALLOWED_DOMAINS": "geniusdomainnames.com"
+    "ALLOWED_DOMAINS": "geniusdomainnames.com",
+    "APP_URL": "https://emailsender-multiplatfrom.vercel.app",
+    "NTFY_TOPIC": "email-sender-multiplatform"
   }
 }

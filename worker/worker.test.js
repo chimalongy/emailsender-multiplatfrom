@@ -12,3 +12,29 @@ test("email handler rejects unsupported domain and oversized messages",async()=>
 test("D1 API serves direct requests without signature",async()=>{const body=JSON.stringify({action:"messages"}),req=new Request("https://worker.example/api/messages",{method:"POST",body,headers:{"content-type":"application/json"}});const res=await worker.fetch(req,env);assert.equal(res.status,200);});
 
 test("signed D1 API serves mailbox list",async()=>{const body=JSON.stringify({action:"messages",folder:"inbox"}),timestamp=String(Date.now()),signature=createHmac("sha256",env.INBOUND_SECRET).update(timestamp+"."+body).digest("hex"),req=new Request("https://worker.example/api/messages",{method:"POST",body,headers:{"x-timestamp":timestamp,"x-signature":signature}});const res=await worker.fetch(req,env);assert.equal(res.status,200);assert.deepEqual(await res.json(),[])});
+
+test("inbound email dispatches ntfy push notification with quick buttons when NTFY_TOPIC configured",async()=>{
+ const origFetch = globalThis.fetch;
+ let sentPayload = null;
+ globalThis.fetch = async (url, opts) => {
+  if (url === "https://ntfy.sh") {
+   sentPayload = JSON.parse(opts.body);
+   return new Response("ok", { status: 200 });
+  }
+  return origFetch(url, opts);
+ };
+ try {
+  const customEnv = { ...env, NTFY_TOPIC: "my-test-topic", MESSAGES: binding() };
+  const m = msg();
+  await worker.email(m, customEnv);
+  assert.ok(sentPayload);
+  assert.equal(sentPayload.topic, "my-test-topic");
+  assert.match(sentPayload.title, /New email from/);
+  assert.equal(sentPayload.actions?.length, 2);
+  assert.equal(sentPayload.actions[0].label, "📂 Open Mailbox");
+  assert.equal(sentPayload.actions[1].label, "↩️ Quick Reply");
+  assert.ok(sentPayload.actions[1].url.startsWith("mailto:reader@example.org"));
+ } finally {
+  globalThis.fetch = origFetch;
+ }
+});
