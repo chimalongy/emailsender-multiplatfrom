@@ -11,6 +11,7 @@ import { messageStore } from '../../../lib/d1.js';
 import { Client as QStashClient, Receiver as QStashReceiver } from '@upstash/qstash';
 import { dispatchCampaignMessage } from '../../../lib/campaign-dispatcher.js';
 import { DEFAULT_TIMEZONE, parseLocalDateTimeInTz, formatDateInTz } from '../../../lib/timezone.js';
+import { isFcmConfigured, getPublicFcmConfig, sendFcmPushToAll } from '../../../lib/fcm.js';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
@@ -93,6 +94,11 @@ async function state() {
     const activeSenders = connections.filter(c => c.provider !== 'cloudflare' && c.enabled);
     const totalDailyCapacity = activeSenders.reduce((n, c) => n + ((c.daily_limit !== null && c.daily_limit !== undefined) ? Number(c.daily_limit) : (providers[c.provider]?.daily || 0)), 0);
     const scheduledBroadcasts = campaignMessages.filter(m => m.status === 'scheduled');
+    let fcmTokensCount = 0;
+    try {
+        const [fcmRow] = await sql`SELECT count(*)::int as count FROM fcm_tokens`;
+        fcmTokensCount = fcmRow?.count || 0;
+    } catch {}
     return {
         connections: connections.map(c => ({ ...c, usage: usage.filter(u => u.id === c.id).map(u => u.window) })),
         personas: await sql`SELECT * FROM personas ORDER BY name`,
@@ -101,6 +107,11 @@ async function state() {
         totalDailyCapacity,
         scheduledBroadcasts,
         blacklist: await sql`SELECT * FROM blacklist ORDER BY created_at DESC`,
+        fcm: {
+            configured: isFcmConfigured(),
+            publicConfig: getPublicFcmConfig(),
+            registeredCount: fcmTokensCount
+        },
         providers
     };
 }
@@ -162,6 +173,33 @@ async function handler(req, { params }) {
                 await dispatchCampaignMessage({ campaignMessageId, sql });
             }
             return json({ ok: true });
+        }
+        if (req.method === 'POST' && path === 'inbound/notify') {
+            const raw = await readBody(req);
+            const secret = process.env.INBOUND_SECRET;
+            if (secret) {
+                const timestamp = req.headers.get('x-timestamp');
+                const signature = req.headers.get('x-signature');
+                if (!timestamp || !signature) fail('Missing signature', 401);
+                if (Math.abs(Date.now() - Number(timestamp)) > 300000) fail('Expired signature', 401);
+                const expected = createHmac('sha256', secret).update(`${timestamp}.${raw}`).digest('hex');
+                if (!equal(signature, expected)) fail('Invalid signature', 401);
+            }
+            let data = {};
+            try { data = JSON.parse(raw); } catch {}
+            const sender = data.fromName ? `${data.fromName} <${data.from}>` : (data.from || 'Someone');
+            const title = `New email from ${sender}`;
+            const body = data.subject ? `Subject: ${data.subject}` : (data.snippet || 'You received a new email.');
+            const sql = db();
+            await ensureCampaignTables(sql);
+            const dispatched = await sendFcmPushToAll({
+                title,
+                body,
+                url: '/mailbox',
+                tag: `inbound-${Date.now()}`,
+                sql
+            });
+            return json({ ok: true, dispatched });
         }
         if (req.method === 'POST' && path === 'login') {
             const body = JSON.parse(await readBody(req, 2000));
@@ -272,6 +310,36 @@ async function handler(req, { params }) {
         if (path === 'logout') { (await cookies()).delete('session'); return json({ ok: true }); }
         const p = JSON.parse(await readBody(req));
         const sql = db();
+        if (path === 'notifications/register') {
+            const token = line(p.token, 'token', 1000);
+            const userAgent = typeof p.userAgent === 'string' ? p.userAgent.slice(0, 500) : null;
+            await ensureCampaignTables(sql);
+            await sql`
+                INSERT INTO fcm_tokens (token, user_agent, updated_at)
+                VALUES (${token}, ${userAgent}, now())
+                ON CONFLICT (token) DO UPDATE SET
+                    user_agent = EXCLUDED.user_agent,
+                    updated_at = now()
+            `;
+            return json({ ok: true });
+        }
+        if (path === 'notifications/unregister') {
+            const token = line(p.token, 'token', 1000);
+            await ensureCampaignTables(sql);
+            await sql`DELETE FROM fcm_tokens WHERE token = ${token}`;
+            return json({ ok: true });
+        }
+        if (path === 'notifications/test') {
+            await ensureCampaignTables(sql);
+            const result = await sendFcmPushToAll({
+                title: '🔔 Test Push Notification',
+                body: 'Firebase Cloud Messaging push is working seamlessly with EmailSender!',
+                url: '/mailbox',
+                tag: 'fcm-test',
+                sql
+            });
+            return json({ ok: true, result });
+        }
         if (path === 'personas' || path === 'personas/delete') {
             if (path === 'personas/delete' || p.action === 'delete') {
                 const id = uuid(p.id);

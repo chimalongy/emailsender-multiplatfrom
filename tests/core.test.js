@@ -7,6 +7,7 @@ import {encrypt,decrypt,session,validSession,signature,inboundOK} from '../lib/s
 import {buildRequest,sendEmail} from '../lib/providers.js';
 import {email,domain,parseEmailList,campaignSlug,matchesCampaign} from '../lib/validation.js';
 import {parseLocalDateTimeInTz,formatDateInTz,toLocalDateStr,toLocalDatetimeInputStr} from '../lib/timezone.js';
+import {isFcmConfigured, getPublicFcmConfig, sendFcmPushToAll} from '../lib/fcm.js';
 test('credentials store as JSON and decrypt accurately',()=>{const a=encrypt({apiKey:'secret'});assert.deepEqual(decrypt(a),{apiKey:'secret'});});
 test('session validates and expires',()=>{const s=session();assert.ok(validSession(s));assert.ok(!validSession('expired'));});
 
@@ -249,4 +250,67 @@ test('scheduled follow-ups prevent same-date collisions and ensure follow-up is 
 
   await pg.close();
 });
+
+test('fcm_tokens table persists device registrations and handles upsert/deletion', async () => {
+  const pg = new PGlite();
+  await pg.exec(await readFile(new URL('../db/schema.sql', import.meta.url), 'utf8'));
+
+  const token1 = 'fcm-device-token-' + randomUUID();
+  const token2 = 'fcm-device-token-' + randomUUID();
+
+  // Insert initial device token
+  await pg.query(`
+    INSERT INTO fcm_tokens(token, user_agent, updated_at)
+    VALUES($1, $2, now())
+  `, [token1, 'Chrome Mobile']);
+
+  const rows1 = (await pg.query('SELECT * FROM fcm_tokens')).rows;
+  assert.equal(rows1.length, 1);
+  assert.equal(rows1[0].token, token1);
+  assert.equal(rows1[0].user_agent, 'Chrome Mobile');
+
+  // Upsert token1 with updated user_agent
+  await pg.query(`
+    INSERT INTO fcm_tokens(token, user_agent, updated_at)
+    VALUES($1, $2, now())
+    ON CONFLICT (token) DO UPDATE SET
+      user_agent = EXCLUDED.user_agent,
+      updated_at = now()
+  `, [token1, 'Chrome Desktop Updated']);
+
+  const rowsUpdated = (await pg.query('SELECT * FROM fcm_tokens WHERE token=$1', [token1])).rows;
+  assert.equal(rowsUpdated.length, 1);
+  assert.equal(rowsUpdated[0].user_agent, 'Chrome Desktop Updated');
+
+  // Insert token2
+  await pg.query(`
+    INSERT INTO fcm_tokens(token, user_agent, updated_at)
+    VALUES($1, $2, now())
+  `, [token2, 'Safari Mobile']);
+
+  assert.equal((await pg.query('SELECT count(*) AS n FROM fcm_tokens')).rows[0].n, 2);
+
+  // Delete token1
+  await pg.query('DELETE FROM fcm_tokens WHERE token=$1', [token1]);
+  const rowsAfterDelete = (await pg.query('SELECT * FROM fcm_tokens')).rows;
+  assert.equal(rowsAfterDelete.length, 1);
+  assert.equal(rowsAfterDelete[0].token, token2);
+
+  // FCM config helpers
+  const publicConfig = getPublicFcmConfig();
+  assert.equal(typeof publicConfig, 'object');
+  assert.equal(typeof publicConfig.isEnabled, 'boolean');
+
+  // Push to all without server credentials gracefully returns skipped
+  const result = await sendFcmPushToAll({
+    title: 'Test',
+    body: 'Test body',
+    sql: async () => rowsAfterDelete
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.skipped, true);
+
+  await pg.close();
+});
+
 

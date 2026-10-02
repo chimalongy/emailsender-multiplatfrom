@@ -13,28 +13,30 @@ test("D1 API serves direct requests without signature",async()=>{const body=JSON
 
 test("signed D1 API serves mailbox list",async()=>{const body=JSON.stringify({action:"messages",folder:"inbox"}),timestamp=String(Date.now()),signature=createHmac("sha256",env.INBOUND_SECRET).update(timestamp+"."+body).digest("hex"),req=new Request("https://worker.example/api/messages",{method:"POST",body,headers:{"x-timestamp":timestamp,"x-signature":signature}});const res=await worker.fetch(req,env);assert.equal(res.status,200);assert.deepEqual(await res.json(),[])});
 
-test("inbound email dispatches ntfy push notification with quick buttons when NTFY_TOPIC configured",async()=>{
- const origFetch = globalThis.fetch;
- let sentPayload = null;
- globalThis.fetch = async (url, opts) => {
-  if (url === "https://ntfy.sh") {
-   sentPayload = JSON.parse(opts.body);
-   return new Response("ok", { status: 200 });
-  }
-  return origFetch(url, opts);
- };
- try {
-  const customEnv = { ...env, NTFY_TOPIC: "my-test-topic", MESSAGES: binding() };
-  const m = msg();
-  await worker.email(m, customEnv);
-  assert.ok(sentPayload);
-  assert.equal(sentPayload.topic, "my-test-topic");
-  assert.match(sentPayload.title, /New email from/);
-  assert.equal(sentPayload.actions?.length, 2);
-  assert.equal(sentPayload.actions[0].label, "📂 Open Mailbox");
-  assert.equal(sentPayload.actions[1].label, "↩️ Quick Reply");
-  assert.ok(sentPayload.actions[1].url.startsWith("mailto:reader@example.org"));
- } finally {
-  globalThis.fetch = origFetch;
- }
+test("email handler dispatches HMAC-signed push notification request to APP_URL", async () => {
+    let capturedUrl, capturedHeaders, capturedBody;
+    const originalFetch = globalThis.fetch;
+    try {
+        globalThis.fetch = async (url, opts) => {
+            capturedUrl = url;
+            capturedHeaders = opts.headers;
+            capturedBody = opts.body;
+            return new Response('{"ok":true}');
+        };
+        const m = msg();
+        const testEnv = { ...env, APP_URL: "https://my-app.example" };
+        await worker.email(m, testEnv);
+        assert.equal(capturedUrl, "https://my-app.example/api/inbound/notify");
+        assert.ok(capturedHeaders["x-timestamp"]);
+        assert.ok(capturedHeaders["x-signature"]);
+        const expectedSig = createHmac("sha256", env.INBOUND_SECRET)
+            .update(`${capturedHeaders["x-timestamp"]}.${capturedBody}`)
+            .digest("hex");
+        assert.equal(capturedHeaders["x-signature"], expectedSig);
+        const parsed = JSON.parse(capturedBody);
+        assert.equal(parsed.from, "reader@example.org");
+        assert.equal(parsed.subject, "Hello");
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
 });

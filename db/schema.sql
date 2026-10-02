@@ -130,4 +130,14 @@ CREATE TABLE IF NOT EXISTS blacklist (
 );
 CREATE INDEX IF NOT EXISTS idx_blacklist_email ON blacklist(email);
 
+CREATE TABLE IF NOT EXISTS fcm_tokens (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ token text NOT NULL UNIQUE,
+ user_agent text,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_fcm_tokens_token ON fcm_tokens(token);
+
+
 
