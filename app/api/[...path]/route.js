@@ -270,6 +270,7 @@ async function handler(req, { params }) {
         if (req.method !== 'POST') fail('Not found', 404);
         if (path === 'logout') { (await cookies()).delete('session'); return json({ ok: true }); }
         const p = JSON.parse(await readBody(req));
+        const sql = db();
         if (path === 'personas' || path === 'personas/delete') {
             if (path === 'personas/delete' || p.action === 'delete') {
                 const id = uuid(p.id);
