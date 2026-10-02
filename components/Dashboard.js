@@ -590,7 +590,7 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
         </button>
        </div>
       </form>
-     <div style={{display:'flex',flexDirection:'column',gap:'20px'}}>
+     <div className="campaign-right-column" style={{display:'flex',flexDirection:'column',gap:'20px',width:'100%',maxWidth:'100%',minWidth:0,boxSizing:'border-box',overflowX:'hidden'}}>
       <div className="card">
        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'12px',flexWrap:'wrap',gap:'10px'}}>
         <div>
@@ -712,18 +712,18 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
         </div>
        )}
       </div>
-      <div className="card">
-       <h3 style={{marginBottom:'4px'}}>Campaign Batches & Dispatches</h3>
+      <div className="card batch-dispatches-card" style={{width:'100%',maxWidth:'100%',minWidth:0,boxSizing:'border-box',overflowX:'hidden'}}>
+       <h3 style={{marginBottom:'4px',wordBreak:'break-word',overflowWrap:'anywhere'}}>Campaign Batches & Dispatches</h3>
        <p className="muted" style={{fontSize:'12px',margin:'0 0 12px'}}>{(selectedCampaign.messages||[]).length} batch{(selectedCampaign.messages?.length===1)?'':'es'} dispatched</p>
        {!(selectedCampaign.messages||[]).length?(
         <p className="muted" style={{fontSize:'13px',margin:0}}>No batches sent yet. Use the composer on the left to send your first message to this campaign.</p>
        ):(
-        <div style={{display:'grid',gap:'12px',maxHeight:'380px',overflowY:'auto'}}>
+        <div className="batch-dispatches-list" style={{display:'grid',gap:'12px',maxHeight:'380px',overflowY:'auto',overflowX:'hidden',width:'100%',maxWidth:'100%',minWidth:0,boxSizing:'border-box'}}>
          {selectedCampaign.messages.map((m,idx)=>{
           const batchNumber = selectedCampaign.messages.length - idx;
           const stats = m.platform_stats && typeof m.platform_stats === 'object' && Object.keys(m.platform_stats).length > 0 ? m.platform_stats : null;
           return (
-           <div key={m.id} className="batch-history-card" style={{padding:'13px 14px',background:'var(--bg)',borderRadius:'8px',border:'1px solid var(--line)',maxWidth:'100%',boxSizing:'border-box'}}>
+           <div key={m.id} className="batch-history-card" style={{padding:'13px 14px',background:'var(--bg)',borderRadius:'8px',border:'1px solid var(--line)',width:'100%',maxWidth:'100%',minWidth:0,boxSizing:'border-box',overflowX:'hidden'}}>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:'8px',flexWrap:'wrap'}}>
              <div style={{minWidth:0,flex:'1 1 auto'}}>
               <div style={{display:'flex',alignItems:'center',gap:'6px',flexWrap:'wrap',marginBottom:'4px'}}>
@@ -750,7 +750,7 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
               )) }
              </div>
             )}
-            {m.text_body&&<p style={{fontSize:'12px',color:'var(--muted)',margin:'8px 0 0',maxHeight:'38px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{m.text_body}</p>}
+            {m.text_body&&<p style={{fontSize:'12px',color:'var(--muted)',margin:'8px 0 0',display:'-webkit-box',WebkitLineClamp:2,WebkitBoxOrient:'vertical',overflow:'hidden',wordBreak:'break-word',overflowWrap:'anywhere',maxWidth:'100%',minWidth:0,lineHeight:1.4}}>{m.text_body}</p>}
             <div className="batch-action-row" style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginTop:'12px',paddingTop:'10px',borderTop:'1px dashed var(--line)',flexWrap:'wrap',gap:'8px'}}>
              <button type="button" className="secondary batch-action-btn" style={{padding:'6px 11px',fontSize:'11px'}} onClick={()=>openBatchDetails(m.id)}>
               📊 View Batch Details

@@ -1178,3 +1178,57 @@ html, body {
   }
 }
 
+
+
+/* ============================================================
+   Campaign Batches & Dispatches Mobile Overflow Fixes
+   ============================================================ */
+.campaign-right-column,
+.batch-dispatches-card,
+.batch-dispatches-list,
+.batch-history-card {
+  width: 100% !important;
+  max-width: 100% !important;
+  min-width: 0 !important;
+  box-sizing: border-box !important;
+  overflow-x: hidden !important;
+}
+
+.batch-history-card {
+  word-break: break-word !important;
+  overflow-wrap: anywhere !important;
+}
+
+.batch-history-card * {
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+@media (max-width: 768px) {
+  .batch-action-row {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: stretch !important;
+    width: 100% !important;
+    gap: 8px !important;
+  }
+  .batch-action-btn {
+    width: 100% !important;
+    display: block !important;
+    text-align: center !important;
+    box-sizing: border-box !important;
+  }
+  .batch-history-card {
+    padding: 12px 10px !important;
+  }
+}
+
+@media (max-width: 480px) {
+  .batch-dispatches-card {
+    padding: 14px 10px !important;
+  }
+  .batch-history-card {
+    padding: 10px 8px !important;
+  }
+}
+
