@@ -988,3 +988,193 @@ html, body {
     padding: 9px 11px !important;
   }
 }
+
+
+/* ============================================================
+   Mailbox Accordion & Mobile Responsive Styles
+   ============================================================ */
+.mail-accordion-item {
+  border-bottom: 1px solid var(--line);
+  transition: background 0.15s ease;
+  width: 100%;
+  box-sizing: border-box;
+}
+.mail-accordion-item:last-child {
+  border-bottom: none;
+}
+.mailrow {
+  background: none;
+  text-align: left;
+  display: block;
+  width: 100%;
+  color: var(--ink);
+  border: none !important;
+  border-bottom: none !important;
+  border-radius: 0;
+  padding: 16px 18px;
+  font-weight: 400;
+  cursor: pointer;
+  transition: background 0.15s ease;
+  box-sizing: border-box;
+}
+.mailrow:hover {
+  background: rgba(18, 99, 77, 0.04);
+}
+.mailrow.selected-row {
+  background: #f0f7f3;
+}
+.mailrow-header {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  font-size: 11px;
+}
+.mailrow-contact {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: calc(100% - 110px);
+  color: var(--ink);
+  font-size: 13px;
+}
+.mailrow-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.mailrow-meta time {
+  font-size: 10.5px;
+  color: var(--muted);
+}
+.accordion-chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  font-size: 9px;
+  color: var(--muted);
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.05);
+  transition: all 0.2s ease;
+}
+.accordion-chevron.open {
+  background: var(--green);
+  color: #fff;
+}
+.mailrow-subject {
+  margin: 6px 0 8px;
+  font-size: 13.5px;
+  color: var(--ink);
+  font-weight: 500;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+.mailrow-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.mail-accordion-panel {
+  padding: 14px 16px 20px;
+  background: #f6faf7;
+  border-top: 1px solid var(--line);
+  box-sizing: border-box;
+  animation: mailAccordionSlide 0.2s ease-out;
+  overflow-x: hidden;
+  width: 100%;
+}
+@keyframes mailAccordionSlide {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.mailbox-message-card {
+  margin-bottom: 14px;
+  box-sizing: border-box;
+  max-width: 100%;
+  overflow-x: hidden;
+  border-radius: 10px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.05);
+}
+.mailbox-message-card:last-child {
+  margin-bottom: 0;
+}
+.mailbox-iframe-wrap {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: #fff;
+  margin: 12px 0;
+}
+.mailbox-iframe-wrap iframe {
+  width: 100%;
+  min-height: 320px;
+  border: 0;
+  display: block;
+}
+
+/* Visibility toggles between mobile accordion and desktop 2-column layout */
+@media (max-width: 900px) {
+  .mailcolumns {
+    display: block !important;
+    width: 100% !important;
+    max-width: 100% !important;
+  }
+  .desktop-only {
+    display: none !important;
+  }
+  .mobile-only {
+    display: block !important;
+  }
+  .accordion-chevron {
+    display: inline-flex !important;
+  }
+}
+
+@media (min-width: 901px) {
+  .desktop-only {
+    display: block !important;
+  }
+  .mobile-only {
+    display: none !important;
+  }
+  .accordion-chevron {
+    display: none !important;
+  }
+}
+
+@media (max-width: 480px) {
+  .mailrow {
+    padding: 13px 12px !important;
+  }
+  .mail-accordion-panel {
+    padding: 10px 8px 16px !important;
+  }
+  .mailrow-contact {
+    max-width: calc(100% - 95px) !important;
+    font-size: 12.5px !important;
+  }
+  .mailrow-subject {
+    font-size: 13px !important;
+  }
+}
+
+@media (max-width: 360px) {
+  .mailrow {
+    padding: 12px 8px !important;
+  }
+  .mail-accordion-panel {
+    padding: 8px 6px 14px !important;
+  }
+  .mailrow-contact {
+    max-width: calc(100% - 85px) !important;
+    font-size: 12px !important;
+  }
+}
+
