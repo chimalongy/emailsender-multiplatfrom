@@ -91,7 +91,7 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
   setError('');
   setNotice('');
   try {
-   const res = await api('notifications/test');
+   const res = await api('notifications/test', {});
    if (res.result?.skipped) {
     setError(`Cannot send push: ${res.result.reason}`);
    } else if (res.result?.totalDevices === 0) {

@@ -306,9 +306,22 @@ async function handler(req, { params }) {
             const rows=await messageStore('messages',{thread:thread?uuid(thread):null,folder,offset});
             return json(thread?rows.map(m=>({...m,html_body:clean(m.html_body)})):rows);
         }
+        if (path === 'notifications/test') {
+            const sql = db();
+            await ensureCampaignTables(sql);
+            const result = await sendFcmPushToAll({
+                title: '🔔 Test Push Notification',
+                body: 'Firebase Cloud Messaging push is working seamlessly with EmailSender!',
+                url: '/mailbox',
+                tag: 'fcm-test',
+                sql
+            });
+            return json({ ok: true, result });
+        }
         if (req.method !== 'POST') fail('Not found', 404);
         if (path === 'logout') { (await cookies()).delete('session'); return json({ ok: true }); }
-        const p = JSON.parse(await readBody(req));
+        const raw = await readBody(req);
+        const p = raw ? JSON.parse(raw) : {};
         const sql = db();
         if (path === 'notifications/register') {
             const token = line(p.token, 'token', 1000);
@@ -328,17 +341,6 @@ async function handler(req, { params }) {
             await ensureCampaignTables(sql);
             await sql`DELETE FROM fcm_tokens WHERE token = ${token}`;
             return json({ ok: true });
-        }
-        if (path === 'notifications/test') {
-            await ensureCampaignTables(sql);
-            const result = await sendFcmPushToAll({
-                title: '🔔 Test Push Notification',
-                body: 'Firebase Cloud Messaging push is working seamlessly with EmailSender!',
-                url: '/mailbox',
-                tag: 'fcm-test',
-                sql
-            });
-            return json({ ok: true, result });
         }
         if (path === 'personas' || path === 'personas/delete') {
             if (path === 'personas/delete' || p.action === 'delete') {
