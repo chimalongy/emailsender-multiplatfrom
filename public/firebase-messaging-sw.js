@@ -21,7 +21,7 @@ if (firebaseConfig.apiKey && firebaseConfig.projectId) {
       const title = payload.notification?.title || payload.data?.title || '✉️ New Email';
       const body = payload.notification?.body || payload.data?.body || 'You have received a new message.';
       const icon = payload.notification?.icon || '/favicon.ico';
-      const clickAction = payload.fcmOptions?.link || payload.data?.url || '/mailbox';
+      const clickAction = payload.fcmOptions?.link || payload.data?.url || '/mailbox/inbox';
 
       self.registration.showNotification(title, {
         body,
@@ -41,7 +41,7 @@ if (firebaseConfig.apiKey && firebaseConfig.projectId) {
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
-  const targetUrl = event.notification.data?.url || '/mailbox';
+  const targetUrl = event.notification.data?.url || '/mailbox/inbox';
 
   event.waitUntil(
     clients.matchAll({ type: 'window', includeUncontrolled: true }).then((windowClients) => {

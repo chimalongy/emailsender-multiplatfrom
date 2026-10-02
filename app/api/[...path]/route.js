@@ -195,7 +195,7 @@ async function handler(req, { params }) {
             const dispatched = await sendFcmPushToAll({
                 title,
                 body,
-                url: '/mailbox',
+                url: '/mailbox/inbox',
                 tag: `inbound-${Date.now()}`,
                 sql
             });
@@ -312,7 +312,7 @@ async function handler(req, { params }) {
             const result = await sendFcmPushToAll({
                 title: '🔔 Test Push Notification',
                 body: 'Firebase Cloud Messaging push is working seamlessly with EmailSender!',
-                url: '/mailbox',
+                url: '/mailbox/inbox',
                 tag: 'fcm-test',
                 sql
             });
