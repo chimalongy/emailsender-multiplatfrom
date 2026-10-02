@@ -86,6 +86,7 @@ async function state() {
     const campaignsWithMessages = campaigns.map(c => ({
         ...c,
         recipients: Array.isArray(c.recipients) ? c.recipients : JSON.parse(c.recipients || '[]'),
+        unsubscribed: Array.isArray(c.unsubscribed) ? c.unsubscribed : JSON.parse(c.unsubscribed || '[]'),
         messages: campaignMessages.filter(m => m.campaign_id === c.id)
     }));
     const dailyCapacity = await getDailyAvailableCapacity(sql);
@@ -458,14 +459,73 @@ async function handler(req, { params }) {
             await sql`UPDATE campaign_messages SET status='cancelled', qstash_message_id=NULL WHERE id=${id}`;
             return json({ ok: true, cancelled: true });
         }
+        if (path === 'campaigns/unsubscribe') {
+            await ensureCampaignTables(sql);
+            const campaignId = uuid(p.campaignId);
+            const [campaign] = await sql`SELECT * FROM campaigns WHERE id=${campaignId}`;
+            if (!campaign) fail('Campaign not found', 404);
+            const rawEmails = parseEmailList(p.emails || p.email || []);
+            if (!rawEmails.length) fail('Please provide valid email(s) to unsubscribe from this campaign', 400);
+
+            const current = Array.isArray(campaign.unsubscribed) ? campaign.unsubscribed : JSON.parse(campaign.unsubscribed || '[]');
+            const currentSet = new Set(current.map(e => e.toLowerCase()));
+            const toAdd = rawEmails.filter(e => !currentSet.has(e.toLowerCase()));
+            const updated = [...current, ...toAdd];
+
+            const [saved] = await sql`UPDATE campaigns SET unsubscribed=${JSON.stringify(updated)}::jsonb WHERE id=${campaign.id} RETURNING *`;
+            return json({
+                ok: true,
+                addedCount: toAdd.length,
+                unsubscribed: updated,
+                campaign: {
+                    ...saved,
+                    recipients: Array.isArray(saved.recipients) ? saved.recipients : JSON.parse(saved.recipients || '[]'),
+                    unsubscribed: updated
+                }
+            });
+        }
+        if (path === 'campaigns/resubscribe') {
+            await ensureCampaignTables(sql);
+            const campaignId = uuid(p.campaignId);
+            const [campaign] = await sql`SELECT * FROM campaigns WHERE id=${campaignId}`;
+            if (!campaign) fail('Campaign not found', 404);
+            const rawEmails = parseEmailList(p.emails || p.email || []);
+            if (!rawEmails.length) fail('Please provide valid email(s) to resubscribe to this campaign', 400);
+
+            const toRemoveSet = new Set(rawEmails.map(e => e.toLowerCase()));
+            const current = Array.isArray(campaign.unsubscribed) ? campaign.unsubscribed : JSON.parse(campaign.unsubscribed || '[]');
+            const updated = current.filter(e => !toRemoveSet.has(e.toLowerCase()));
+
+            const [saved] = await sql`UPDATE campaigns SET unsubscribed=${JSON.stringify(updated)}::jsonb WHERE id=${campaign.id} RETURNING *`;
+            return json({
+                ok: true,
+                removedCount: current.length - updated.length,
+                unsubscribed: updated,
+                campaign: {
+                    ...saved,
+                    recipients: Array.isArray(saved.recipients) ? saved.recipients : JSON.parse(saved.recipients || '[]'),
+                    unsubscribed: updated
+                }
+            });
+        }
         if (path === 'campaigns/send') {
             await ensureCampaignTables(sql);
             const campaignId = uuid(p.campaignId);
             const [campaign] = await sql`SELECT * FROM campaigns WHERE id=${campaignId}`;
             if (!campaign) fail('Campaign not found', 404);
 
-            const recipients = Array.isArray(campaign.recipients) ? campaign.recipients : JSON.parse(campaign.recipients || '[]');
-            if (!recipients.length) fail('Campaign has no recipient emails', 400);
+            const rawRecipients = Array.isArray(campaign.recipients) ? campaign.recipients : JSON.parse(campaign.recipients || '[]');
+            const unsubscribedList = Array.isArray(campaign.unsubscribed) ? campaign.unsubscribed : JSON.parse(campaign.unsubscribed || '[]');
+            const unsubscribedSet = new Set(unsubscribedList.map(e => String(e).toLowerCase().trim()));
+
+            const blacklistedRows = await sql`SELECT lower(email) AS email FROM blacklist`;
+            const blacklistSet = new Set(blacklistedRows.map(r => r.email.toLowerCase().trim()));
+
+            const recipients = rawRecipients.filter(e => {
+                const lower = String(e).toLowerCase().trim();
+                return !unsubscribedSet.has(lower) && !blacklistSet.has(lower);
+            });
+            if (!recipients.length) fail('No active recipients in this campaign (all recipients are either unsubscribed from this campaign or in the global blacklist)', 400);
 
             const subject = line(p.subject, 'subject');
             if (typeof p.text !== 'string' || !p.text.trim() || p.text.length > 100000) fail('Message body is required (maximum 100,000 characters)');
@@ -477,6 +537,13 @@ async function handler(req, { params }) {
             const parentBatchId = p.parentBatchId ? uuid(p.parentBatchId) : null;
             if (isFollowUp && !parentBatchId) fail('Follow-up broadcast requires a parent batch ID', 400);
 
+            let parentBatch = null;
+            if (isFollowUp) {
+                const [pb] = await sql`SELECT * FROM campaign_messages WHERE id=${parentBatchId}`;
+                if (!pb) fail('Parent batch not found', 404);
+                parentBatch = pb;
+            }
+
             // Is this a scheduled broadcast?
             if (p.scheduledAt) {
                 const tz = p.timezone || req.headers.get('x-timezone') || process.env.TIMEZONE || DEFAULT_TIMEZONE;
@@ -484,9 +551,31 @@ async function handler(req, { params }) {
                 if (!scheduledDate || isNaN(scheduledDate.getTime())) fail('Invalid scheduled date/time', 400);
                 if (scheduledDate.getTime() <= Date.now() + 30000) fail('Scheduled time must be at least 30 seconds in the future', 400);
 
+                // If parent batch is scheduled, ensure follow-up is scheduled AFTER parent
+                if (isFollowUp && parentBatch?.status === 'scheduled') {
+                    const parentDate = new Date(parentBatch.scheduled_at);
+                    if (scheduledDate.getTime() <= parentDate.getTime()) {
+                        fail(`The follow-up must be scheduled after the parent batch (parent batch is scheduled for ${parentDate.toLocaleString()}).`, 400);
+                    }
+                }
+
+                // Check constraint: The next follow-up / broadcast should not be on the same date with a pending scheduled dispatch for this campaign
+                const dateStr = formatDateInTz(scheduledDate, tz);
+                const [sameDateDispatch] = await sql`
+                    SELECT id, subject, is_follow_up, scheduled_at 
+                    FROM campaign_messages 
+                    WHERE campaign_id = ${campaign.id} 
+                      AND status = 'scheduled' 
+                      AND (scheduled_at AT TIME ZONE ${tz})::date = ${dateStr}::date
+                    LIMIT 1
+                `;
+                if (sameDateDispatch) {
+                    fail(`A ${sameDateDispatch.is_follow_up ? 'follow-up' : 'broadcast'} for this campaign ("${sameDateDispatch.subject}") is already scheduled for ${dateStr}. A campaign cannot have multiple pending dispatches scheduled on the same date.`, 400);
+                }
+
                 const availableForDate = await getCapacityForDate(sql, scheduledDate, tz);
                 if (recipients.length > availableForDate) {
-                    fail(`Cannot schedule campaign: Recipient list has ${recipients.length} emails, but available daily sending capacity for ${formatDateInTz(scheduledDate, tz)} is only ${availableForDate}.`, 400);
+                    fail(`Cannot schedule campaign: Active recipient list has ${recipients.length} emails, but available daily sending capacity for ${formatDateInTz(scheduledDate, tz)} is only ${availableForDate}.`, 400);
                 }
 
                 const [campaignMsg] = await sql`
@@ -525,11 +614,15 @@ async function handler(req, { params }) {
                 });
             }
 
-            // Immediate Send: check today's capacity
+            // Immediate Send:
+            if (isFollowUp && parentBatch?.status === 'scheduled') {
+                fail('Cannot send an immediate follow-up to a pending scheduled batch. Please schedule the follow-up for a time after the parent batch sends.', 400);
+            }
+
             const userTz = p.timezone || req.headers.get('x-timezone') || process.env.TIMEZONE || DEFAULT_TIMEZONE;
             const availableToday = await getCapacityForDate(sql, new Date(), userTz);
             if (recipients.length > availableToday) {
-                fail(`Cannot send campaign: Recipient list has ${recipients.length} emails, but available daily capacity today is only ${availableToday}.`, 400);
+                fail(`Cannot send campaign: Active recipient list has ${recipients.length} emails, but available daily capacity today is only ${availableToday}.`, 400);
             }
 
             const [campaignMsg] = await sql`

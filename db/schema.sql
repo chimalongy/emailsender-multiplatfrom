@@ -83,6 +83,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
  name text NOT NULL,
  recipients jsonb NOT NULL DEFAULT '[]',
+ unsubscribed jsonb NOT NULL DEFAULT '[]',
  created_at timestamptz NOT NULL DEFAULT now()
 );
 

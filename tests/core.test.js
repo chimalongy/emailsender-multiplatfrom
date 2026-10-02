@@ -139,3 +139,114 @@ test('timezone helpers parse local times and prevent UTC 1-hour delays', () => {
   // toLocalDatetimeInputStr produces YYYY-MM-DDTHH:mm
   assert.match(toLocalDatetimeInputStr(new Date()), /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/);
 });
+
+test('campaign unsubscribed list excludes recipients from dispatches and preserves main list', async () => {
+  const pg = new PGlite();
+  await pg.exec(await readFile(new URL('../db/schema.sql', import.meta.url), 'utf8'));
+
+  const campId = randomUUID();
+  const allRecipients = ['alice@example.com', 'bob@example.com', 'charlie@example.com', 'david@example.com'];
+  await pg.query(`INSERT INTO campaigns(id, name, recipients, unsubscribed) VALUES($1, 'Outreach', $2, '[]')`, [campId, JSON.stringify(allRecipients)]);
+
+  // Verify initial state
+  const camp0 = (await pg.query('SELECT * FROM campaigns WHERE id=$1', [campId])).rows[0];
+  const unsub0 = typeof camp0.unsubscribed === 'string' ? JSON.parse(camp0.unsubscribed) : camp0.unsubscribed;
+  assert.deepEqual(unsub0, []);
+
+  // Unsubscribe bob and david from this campaign
+  const toUnsub = ['bob@example.com', 'david@example.com'];
+  await pg.query('UPDATE campaigns SET unsubscribed=$1 WHERE id=$2', [JSON.stringify(toUnsub), campId]);
+
+  const camp1 = (await pg.query('SELECT * FROM campaigns WHERE id=$1', [campId])).rows[0];
+  const recips1 = typeof camp1.recipients === 'string' ? JSON.parse(camp1.recipients) : camp1.recipients;
+  const unsub1 = typeof camp1.unsubscribed === 'string' ? JSON.parse(camp1.unsubscribed) : camp1.unsubscribed;
+  assert.deepEqual(recips1, allRecipients); // main campaign list is preserved
+  assert.deepEqual(unsub1, toUnsub);
+
+  // Active recipient calculation
+  const unsubSet = new Set(unsub1.map(e => e.toLowerCase()));
+  const activeRecipients = recips1.filter(e => !unsubSet.has(e.toLowerCase()));
+  assert.deepEqual(activeRecipients, ['alice@example.com', 'charlie@example.com']);
+
+  // Resubscribe bob
+  const unsub2 = unsub1.filter(e => e.toLowerCase() !== 'bob@example.com');
+  await pg.query('UPDATE campaigns SET unsubscribed=$1 WHERE id=$2', [JSON.stringify(unsub2), campId]);
+  const activeAfterRestore = recips1.filter(e => !new Set(unsub2.map(x => x.toLowerCase())).has(e.toLowerCase()));
+  assert.deepEqual(activeAfterRestore, ['alice@example.com', 'bob@example.com', 'charlie@example.com']);
+
+  await pg.close();
+});
+
+test('scheduled follow-ups prevent same-date collisions and ensure follow-up is after parent batch', async () => {
+  const pg = new PGlite();
+  await pg.exec(await readFile(new URL('../db/schema.sql', import.meta.url), 'utf8'));
+
+  const campId = randomUUID();
+  await pg.query(`INSERT INTO campaigns(id, name, recipients) VALUES($1, 'Drip Series', '["u1@example.com"]')`, [campId]);
+
+  // Batch 1 scheduled for 2026-10-05 10:00 Lagos time
+  const batch1Id = randomUUID();
+  const batch1Date = parseLocalDateTimeInTz('2026-10-05T10:00', 'Africa/Lagos');
+  await pg.query(`
+    INSERT INTO campaign_messages(id, campaign_id, subject, text_body, scheduled_at, status, is_follow_up) 
+    VALUES($1, $2, 'Batch 1 Intro', 'Intro body', $3, 'scheduled', false)
+  `, [batch1Id, campId, batch1Date.toISOString()]);
+
+  // Attempting to schedule Follow-up 1 on the SAME date (2026-10-05 16:00 Lagos time)
+  const tz = 'Africa/Lagos';
+  const followUpSameDay = parseLocalDateTimeInTz('2026-10-05T16:00', tz);
+  const sameDayStr = formatDateInTz(followUpSameDay, tz);
+
+  const sameDateQuery = await pg.query(`
+    SELECT id, subject, is_follow_up, scheduled_at 
+    FROM campaign_messages 
+    WHERE campaign_id = $1 
+      AND status = 'scheduled' 
+      AND (scheduled_at AT TIME ZONE $2)::date = $3::date
+    LIMIT 1
+  `, [campId, tz, sameDayStr]);
+
+  // Collision detected on 2026-10-05
+  assert.equal(sameDateQuery.rows.length, 1);
+  assert.equal(sameDateQuery.rows[0].id, batch1Id);
+
+  // Scheduling Follow-up 1 on a subsequent date (2026-10-08 10:00 Lagos time)
+  const followUpValidDate = parseLocalDateTimeInTz('2026-10-08T10:00', tz);
+  const validDayStr = formatDateInTz(followUpValidDate, tz);
+
+  const diffDateQuery = await pg.query(`
+    SELECT id, subject, is_follow_up, scheduled_at 
+    FROM campaign_messages 
+    WHERE campaign_id = $1 
+      AND status = 'scheduled' 
+      AND (scheduled_at AT TIME ZONE $2)::date = $3::date
+    LIMIT 1
+  `, [campId, tz, validDayStr]);
+
+  // No collision on 2026-10-08
+  assert.equal(diffDateQuery.rows.length, 0);
+
+  // Successfully schedule Follow-up 1
+  const followUp1Id = randomUUID();
+  await pg.query(`
+    INSERT INTO campaign_messages(id, campaign_id, subject, text_body, scheduled_at, status, is_follow_up, parent_batch_id) 
+    VALUES($1, $2, 'Re: Batch 1 Intro', 'Follow up body', $3, 'scheduled', true, $4)
+  `, [followUp1Id, campId, followUpValidDate.toISOString(), batch1Id]);
+
+  // Now attempting to schedule Follow-up 2 on 2026-10-08 (same date as Follow-up 1)
+  const collisionFollowUp2 = await pg.query(`
+    SELECT id, subject, is_follow_up, scheduled_at 
+    FROM campaign_messages 
+    WHERE campaign_id = $1 
+      AND status = 'scheduled' 
+      AND (scheduled_at AT TIME ZONE $2)::date = $3::date
+    LIMIT 1
+  `, [campId, tz, validDayStr]);
+
+  // Collision detected with Follow-up 1!
+  assert.equal(collisionFollowUp2.rows.length, 1);
+  assert.equal(collisionFollowUp2.rows[0].id, followUp1Id);
+
+  await pg.close();
+});
+

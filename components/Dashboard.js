@@ -1,5 +1,5 @@
 'use client';
-import {useEffect,useState} from 'react';
+import {useEffect,useState,useMemo} from 'react';
 import {useRouter,usePathname} from 'next/navigation';
 import {providers} from '../lib/catalog.js';
 import {parseEmailList, campaignSlug, matchesCampaign} from '../lib/validation.js';
@@ -40,6 +40,7 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
  const [connection,setConnection]=useState(initialConnection('brevo')),[inspect,setInspect]=useState(null),[persona,setPersona]=useState({name:'',email:''});
  const [compose,setCompose]=useState({id:'',personaId:'',connectionId:'',to:'',subject:'',text:'',parentId:null}),[folder,setFolder]=useState('inbox'),[offset,setOffset]=useState(0),[messages,setMessages]=useState([]),[thread,setThread]=useState([]);
  const [selectedCampaignId,setSelectedCampaignId]=useState(null),[campaignForm,setCampaignForm]=useState({name:'',emails:''}),[campaignMsg,setCampaignMsg]=useState({personaId:'',subject:'',text:'',sendMode:'now',scheduledAt:'',isFollowUp:false,parentBatchId:null}),[editingRecipients,setEditingRecipients]=useState(false),[recipientEditText,setRecipientEditText]=useState('');
+ const [recipientTab,setRecipientTab]=useState('active'),[unsubInput,setUnsubInput]=useState(''),[addingUnsub,setAddingUnsub]=useState(false);
  const [batchDetailsModal,setBatchDetailsModal]=useState(null),[batchDetailsLoading,setBatchDetailsLoading]=useState(false),[batchDeliveryFilter,setBatchDeliveryFilter]=useState('all'),[batchDeliverySearch,setBatchDeliverySearch]=useState('');
  const [calMonth,setCalMonth]=useState(new Date().getMonth()+1);
  const [calYear,setCalYear]=useState(new Date().getFullYear());
@@ -120,8 +121,83 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
  const campaignSelectedDomain=campaignSelectedPersona?campaignSelectedPersona.email.split('@')[1]:null;
  const campaignEligiblePlatforms=campaignSelectedDomain?activeSenders.filter(c=>c.domains.includes(campaignSelectedDomain)):activeSenders;
  const campaignEligibleCapacity=campaignEligiblePlatforms.reduce((n,c)=>n+Math.max(0,getDailyLimit(c)-getDailySent(c)),0);
- function selectCampaign(c){setSelectedCampaignId(c.id);setRecipientEditText((c.recipients||[]).join('\n'));setEditingRecipients(false);router.push('/campaigns/'+campaignSlug(c));}
- function backToAllCampaigns(){setSelectedCampaignId(null);setEditingRecipients(false);router.push('/campaigns');}
+ const campaignRecipients = selectedCampaign?.recipients || [];
+ const campaignUnsubscribed = selectedCampaign?.unsubscribed || [];
+ const unsubscribedSet = useMemo(() => new Set(campaignUnsubscribed.map(e => String(e).toLowerCase().trim())), [campaignUnsubscribed]);
+ const blacklistSet = useMemo(() => new Set((data.blacklist || []).map(b => String(b.email).toLowerCase().trim())), [data.blacklist]);
+
+ const activeRecipients = useMemo(() => {
+  return campaignRecipients.filter(e => {
+   const l = String(e).toLowerCase().trim();
+   return !unsubscribedSet.has(l) && !blacklistSet.has(l);
+  });
+ }, [campaignRecipients, unsubscribedSet, blacklistSet]);
+
+ const parentBatch = campaignMsg.parentBatchId 
+  ? (selectedCampaign?.messages || []).find(m => m.id === campaignMsg.parentBatchId) 
+  : null;
+ const isParentScheduled = Boolean(campaignMsg.isFollowUp && parentBatch?.status === 'scheduled');
+
+ const pendingScheduledForCampaign = useMemo(() => {
+  return (selectedCampaign?.messages || []).filter(m => m.status === 'scheduled');
+ }, [selectedCampaign?.messages]);
+
+ const scheduledDateConflict = useMemo(() => {
+  if (campaignMsg.sendMode !== 'schedule' || !campaignMsg.scheduledAt) return null;
+  const chosenDateStr = campaignMsg.scheduledAt.slice(0, 10);
+  return pendingScheduledForCampaign.find(m => {
+   if (!m.scheduled_at) return false;
+   const mDateStr = toLocalDatetimeInputStr(new Date(m.scheduled_at)).slice(0, 10);
+   return mDateStr === chosenDateStr;
+  });
+ }, [campaignMsg.sendMode, campaignMsg.scheduledAt, pendingScheduledForCampaign]);
+
+ const isBeforeParentScheduled = useMemo(() => {
+  if (!isParentScheduled || campaignMsg.sendMode !== 'schedule' || !campaignMsg.scheduledAt || !parentBatch?.scheduled_at) return false;
+  const parentTime = new Date(parentBatch.scheduled_at).getTime();
+  const chosenTime = new Date(campaignMsg.scheduledAt).getTime();
+  return chosenTime <= parentTime;
+ }, [isParentScheduled, campaignMsg.sendMode, campaignMsg.scheduledAt, parentBatch?.scheduled_at]);
+
+ function selectCampaign(c){
+  setSelectedCampaignId(c.id);
+  setRecipientEditText((c.recipients||[]).join('\n'));
+  setEditingRecipients(false);
+  setRecipientTab('active');
+  setAddingUnsub(false);
+  setUnsubInput('');
+  router.push('/campaigns/'+campaignSlug(c));
+ }
+ function backToAllCampaigns(){
+  setSelectedCampaignId(null);
+  setEditingRecipients(false);
+  setRecipientTab('active');
+  setAddingUnsub(false);
+  setUnsubInput('');
+  router.push('/campaigns');
+ }
+ async function unsubscribeFromCampaign(emailOrList){
+  if(!selectedCampaign)return;
+  const list=parseEmailList(emailOrList);
+  if(!list.length){setError('Please enter at least one valid email address to unsubscribe.');return;}
+  await run(async()=>{
+   const res=await api('campaigns/unsubscribe',{campaignId:selectedCampaign.id,emails:list});
+   await refresh();
+   setAddingUnsub(false);
+   setUnsubInput('');
+   setNotice(`Added ${res.addedCount||list.length} recipient${(res.addedCount||list.length)===1?'':'s'} to the campaign unsubscribed list. Future follow-ups will exclude them.`);
+  });
+ }
+ async function resubscribeToCampaign(emailOrList){
+  if(!selectedCampaign)return;
+  const list=parseEmailList(emailOrList);
+  if(!list.length)return;
+  await run(async()=>{
+   const res=await api('campaigns/resubscribe',{campaignId:selectedCampaign.id,emails:list});
+   await refresh();
+   setNotice(`Restored ${res.removedCount||list.length} recipient${(res.removedCount||list.length)===1?'':'s'} back to active campaign list.`);
+  });
+ }
  async function createCampaign(e){e.preventDefault();const parsed=parseEmailList(campaignForm.emails);if(!parsed.length){setError('Please enter at least one valid recipient email address.');return;}if(parsed.length>availableDailyCapacity){setError(`Cannot create campaign: The recipient list contains ${parsed.length} emails, but the total available daily sending capacity across all active platforms is only ${availableDailyCapacity}. Please increase platform limits or reduce your recipient list.`);return;}await run(async()=>{const res=await api('campaigns',{name:campaignForm.name,recipients:parsed});await refresh();setCampaignForm({name:'',emails:''});const removedMsg=res.blacklistedRemovedCount?` (${res.blacklistedRemovedCount} blacklisted email${res.blacklistedRemovedCount===1?' was':'s were'} automatically removed)`:'';setNotice(`Campaign "${campaignForm.name}" created with ${res.campaign?.recipients?.length||parsed.length} recipient${(res.campaign?.recipients?.length||parsed.length)===1?'':'s'}${removedMsg}.`);if(res.campaign?.id){setSelectedCampaignId(res.campaign.id);setRecipientEditText((res.campaign.recipients||[]).join('\n'));router.push('/campaigns/'+campaignSlug(res.campaign));}});}
  async function deleteCampaign(c){if(!confirm(`Delete campaign "${c.name}"? This will also remove its campaign message history.`))return;await run(async()=>{await api('campaigns',{action:'delete',id:c.id});if(selectedCampaignId===c.id){setSelectedCampaignId(null);router.push('/campaigns');}await refresh();setNotice(`Campaign "${c.name}" deleted.`);});}
  async function saveRecipients(c){const parsed=parseEmailList(recipientEditText);if(!parsed.length){setError('Please enter at least one valid recipient email address.');return;}if(parsed.length>availableDailyCapacity){setError(`Cannot update campaign: Recipient list has ${parsed.length} emails, but available daily sending capacity across all active platforms is only ${availableDailyCapacity}.`);return;}await run(async()=>{const res=await api('campaigns',{action:'update',id:c.id,recipients:parsed});await refresh();setEditingRecipients(false);const removedMsg=res.blacklistedRemovedCount?` (${res.blacklistedRemovedCount} blacklisted email${res.blacklistedRemovedCount===1?' was':'s were'} automatically removed)`:'';setNotice(`Updated "${c.name}" with ${res.campaign?.recipients?.length||parsed.length} recipient${(res.campaign?.recipients?.length||parsed.length)===1?'':'s'}${removedMsg}.`);});}
@@ -129,8 +205,11 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
  async function removeFromBlacklist(b){if(!confirm(`Remove "${b.email}" from the blacklist?`))return;await run(async()=>{await api('blacklist',{action:'delete',id:b.id});await refresh();setNotice(`Removed "${b.email}" from the blacklist.`);});}
  async function sendCampaignBroadcast(e){
   e.preventDefault();
-  if(!selectedCampaign||!selectedCampaign.recipients?.length){setError('No recipients found in this campaign.');return;}
+  if(!selectedCampaign||!activeRecipients.length){setError('No active recipients found in this campaign (all recipients are either unsubscribed or in the global blacklist).');return;}
   if(campaignMsg.sendMode==='schedule'&&!campaignMsg.scheduledAt){setError('Please select a scheduled date and time for this broadcast.');return;}
+  if(scheduledDateConflict){setError(`A ${scheduledDateConflict.is_follow_up?'follow-up':'broadcast'} ("${scheduledDateConflict.subject}") is already scheduled for ${campaignMsg.scheduledAt.slice(0,10)}. Cannot schedule multiple dispatches on the same date.`);return;}
+  if(isBeforeParentScheduled){setError(`Follow-up must be scheduled after the parent batch (which is scheduled for ${fmt(parentBatch.scheduled_at)}).`);return;}
+  if(isParentScheduled && campaignMsg.sendMode !== 'schedule'){setError('Cannot send an immediate follow-up to a pending scheduled batch. Please schedule the follow-up for a time after the parent batch sends.');return;}
   await run(async()=>{
    const res=await api('campaigns/send',{
     campaignId:selectedCampaign.id,
@@ -178,15 +257,27 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
  function startFollowUp(m){
   const orig=m.subject||'';
   const followSub=/^re:\s*/i.test(orig)?orig:`Re: ${orig}`;
+  const isScheduled=m.status==='scheduled';
+  let nextScheduledTime='';
+  if(isScheduled && m.scheduled_at){
+    const nextDay=new Date(new Date(m.scheduled_at).getTime() + 24*60*60*1000);
+    nextScheduledTime=toLocalDatetimeInputStr(nextDay);
+  }
   setCampaignMsg(prev=>({
    ...prev,
    isFollowUp:true,
    parentBatchId:m.id,
    personaId:m.persona_id||prev.personaId,
    subject:followSub,
-   text:''
+   text:'',
+   sendMode:isScheduled ? 'schedule' : 'now',
+   scheduledAt:isScheduled ? nextScheduledTime : ''
   }));
-  setNotice(`Follow-up mode set for Batch "${m.subject}". Subsequent emails will thread into each recipient's original message.`);
+  if(isScheduled){
+   setNotice(`Follow-up schedule mode enabled for Batch "${m.subject}". It is set to dispatch after the parent batch.`);
+  } else {
+   setNotice(`Follow-up mode set for Batch "${m.subject}". Subsequent emails will thread into each recipient's original message.`);
+  }
  }
   function navigate(p){setPage(p);setMobileMenuOpen(false);setError('');setNotice('');if(p==='Compose'&&!compose.id)setCompose(c=>({...c,id:crypto.randomUUID()}));if(p==='Campaigns')setSelectedCampaignId(null);if(p==='Schedules')setSelectedCalDay(null);const targetPath=tabToPath[p]||'/';if(pathname!==targetPath)router.push(targetPath);}
   return <div className="shell">
@@ -221,18 +312,24 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
       <span className="campaign-slug-badge">/campaigns/{campaignSlug(selectedCampaign)}</span>
      </div>
      <div className="campaign-meta-actions">
-      <span className="badge green">{selectedCampaign.recipients?.length||0} recipient{(selectedCampaign.recipients?.length===1)?'':'s'}</span>
+      <span className="badge green">{activeRecipients.length} active recipient{(activeRecipients.length===1)?'':'s'}</span>
+      {campaignUnsubscribed.length > 0 && <span className="badge" style={{background:'#fee2e2',color:'#991b1b'}}>{campaignUnsubscribed.length} unsubscribed</span>}
       <button type="button" className="btn-delete" disabled={busy} onClick={()=>deleteCampaign(selectedCampaign)}><FiTrash2 size={13}/> Delete Campaign</button>
      </div>
     </div>
     <div className="columns">
      <form className="card form composer" onSubmit={sendCampaignBroadcast}>
       {campaignMsg.isFollowUp&&(
-       <div style={{background:'#eff6ff',border:'1px solid #bfdbfe',borderRadius:'8px',padding:'12px 14px',marginBottom:'16px',display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:'10px',maxWidth:'100%',boxSizing:'border-box'}}>
+       <div style={{background:isParentScheduled?'#fef3c7':'#eff6ff',border:`1px solid ${isParentScheduled?'#fde68a':'#bfdbfe'}`,borderRadius:'8px',padding:'12px 14px',marginBottom:'16px',display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:'10px',maxWidth:'100%',boxSizing:'border-box'}}>
         <div style={{minWidth:0,flex:'1 1 auto'}}>
-         <strong style={{color:'#1e40af',fontSize:'12px',letterSpacing:'0.4px',display:'block'}}>FOLLOW-UP THREADING ENABLED</strong>
-         <span style={{color:'#1e3a8a',fontSize:'12px',wordBreak:'break-word',overflowWrap:'anywhere'}}>
-          This broadcast will be sent directly in the same conversation thread as Batch &quot;{selectedCampaign.messages?.find(m=>m.id===campaignMsg.parentBatchId)?.subject || 'Previous Batch'}&quot;.
+         <strong style={{color:isParentScheduled?'#92400e':'#1e40af',fontSize:'12px',letterSpacing:'0.4px',display:'block'}}>
+          {isParentScheduled ? 'FOLLOW-UP TO PENDING SCHEDULED BATCH' : 'FOLLOW-UP THREADING ENABLED'}
+         </strong>
+         <span style={{color:isParentScheduled?'#78350f':'#1e3a8a',fontSize:'12px',wordBreak:'break-word',overflowWrap:'anywhere'}}>
+          {isParentScheduled 
+            ? `This follow-up will thread into Batch "${parentBatch?.subject || 'Scheduled Batch'}" (scheduled for ${fmt(parentBatch?.scheduled_at)}). It must be scheduled for a date after the parent batch.`
+            : `This broadcast will be sent directly in the same conversation thread as Batch "${parentBatch?.subject || 'Previous Batch'}".`
+          }
          </span>
         </div>
         <button type="button" className="secondary" style={{padding:'4px 10px',fontSize:'11px',flexShrink:0}} onClick={()=>setCampaignMsg(prev=>({...prev,isFollowUp:false,parentBatchId:null,subject:''}))}>
@@ -240,8 +337,12 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
         </button>
        </div>
       )}
-      <h3 style={{fontSize:'18px',marginBottom:'4px'}}>{campaignMsg.isFollowUp ? 'Send a follow-up batch' : 'Send a message to this campaign'}</h3>
+      <h3 style={{fontSize:'18px',marginBottom:'4px'}}>{campaignMsg.isFollowUp ? (isParentScheduled ? 'Schedule a follow-up batch' : 'Send a follow-up batch') : 'Send a message to this campaign'}</h3>
       <p className="muted" style={{marginBottom:'16px'}}>{campaignMsg.isFollowUp ? 'Follow-up emails will be delivered in the same thread as your previous email.' : 'A personalized individual copy will be sent to every recipient in this campaign.'}</p>
+      <div style={{background:'var(--bg)',borderRadius:'6px',padding:'8px 12px',border:'1px solid var(--line)',marginBottom:'14px',display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:'6px',fontSize:'12px'}}>
+       <span>Target: <b style={{color:'var(--green)'}}>{activeRecipients.length} active recipient{activeRecipients.length===1?'':'s'}</b></span>
+       {campaignUnsubscribed.length > 0 && <span className="muted">({campaignUnsubscribed.length} excluded by campaign unsubscribed list)</span>}
+      </div>
       <label>Sender persona
        <select required value={campaignMsg.personaId} onChange={e=>setCampaignMsg({...campaignMsg,personaId:e.target.value})}>
         <option value="">Choose a persona to send as</option>
@@ -292,20 +393,41 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
         </span>
        </div>
        <div className="campaign-dispatch-options">
-        <label style={{display:'flex',alignItems:'center',gap:'6px',cursor:'pointer',fontWeight:'normal'}}>
-         <input type="radio" name="sendMode" checked={campaignMsg.sendMode==='now'} onChange={()=>setCampaignMsg({...campaignMsg,sendMode:'now'})}/>
-         Send Immediately
+        <label style={{display:'flex',alignItems:'center',gap:'6px',cursor:isParentScheduled?'not-allowed':'pointer',fontWeight:'normal',opacity:isParentScheduled?0.6:1}}>
+         <input type="radio" name="sendMode" disabled={isParentScheduled} checked={campaignMsg.sendMode==='now'} onChange={()=>setCampaignMsg({...campaignMsg,sendMode:'now'})}/>
+         Send Immediately {isParentScheduled && <span style={{fontSize:'11px',color:'var(--muted)'}}>(Parent is scheduled)</span>}
         </label>
         <label style={{display:'flex',alignItems:'center',gap:'6px',cursor:'pointer',fontWeight:'normal'}}>
          <input type="radio" name="sendMode" checked={campaignMsg.sendMode==='schedule'} onChange={()=>setCampaignMsg({...campaignMsg,sendMode:'schedule'})}/>
          Schedule for Date & Time ⏱
         </label>
        </div>
+       {isParentScheduled && (
+        <div style={{background:'#fef3c7',border:'1px solid #fde68a',color:'#92400e',borderRadius:'6px',padding:'8px 12px',fontSize:'12px',marginTop:'8px'}}>
+         Parent Batch &quot;{parentBatch?.subject}&quot; is scheduled for {fmt(parentBatch?.scheduled_at)}. This follow-up must be scheduled for a date after the parent batch, and on a date with no other scheduled dispatches for this campaign.
+        </div>
+       )}
        {campaignMsg.sendMode==='schedule'&&(
         <div style={{marginTop:'8px',paddingTop:'8px',borderTop:'1px dashed var(--line)'}}>
          <label style={{margin:0,fontSize:'12px'}}>Scheduled Date & Time (Your Local Time)
-          <input type="datetime-local" required={campaignMsg.sendMode==='schedule'} value={campaignMsg.scheduledAt} min={toLocalDatetimeInputStr(Date.now()+60000)} onChange={e=>setCampaignMsg({...campaignMsg,scheduledAt:e.target.value})}/>
+          <input 
+           type="datetime-local" 
+           required={campaignMsg.sendMode==='schedule'} 
+           value={campaignMsg.scheduledAt} 
+           min={toLocalDatetimeInputStr(isParentScheduled && parentBatch?.scheduled_at ? new Date(new Date(parentBatch.scheduled_at).getTime() + 60000) : (Date.now()+60000))} 
+           onChange={e=>setCampaignMsg({...campaignMsg,scheduledAt:e.target.value})}
+          />
          </label>
+         {scheduledDateConflict && (
+          <div style={{background:'#fee2e2',border:'1px solid #fecaca',color:'#991b1b',borderRadius:'6px',padding:'8px 12px',fontSize:'12px',marginTop:'8px'}}>
+           ⚠️ A {scheduledDateConflict.is_follow_up ? 'follow-up' : 'broadcast'} (&quot;{scheduledDateConflict.subject}&quot;) is already scheduled for {campaignMsg.scheduledAt.slice(0, 10)}. A campaign cannot have multiple pending dispatches scheduled on the same date.
+          </div>
+         )}
+         {isBeforeParentScheduled && (
+          <div style={{background:'#fee2e2',border:'1px solid #fecaca',color:'#991b1b',borderRadius:'6px',padding:'8px 12px',fontSize:'12px',marginTop:'8px'}}>
+           ⚠️ Follow-up must be scheduled for after the parent batch ({fmt(parentBatch?.scheduled_at)}).
+          </div>
+         )}
          <p className="muted" style={{fontSize:'11px',margin:'6px 0 0'}}>
           Checked against daily capacity for that scheduled date. Picked up by DailyScheduler at 2am and triggered at exact time via QStash.
          </p>
@@ -315,8 +437,8 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
       <div className="composerfoot">
         <button type="button" className="secondary" disabled={busy} onClick={()=>setCampaignMsg(prev=>({...prev,subject:'',text:'',sendMode:'now',scheduledAt:'',isFollowUp:false,parentBatchId:null}))}>Clear</button>
         <p className="muted">Dispatched individually · Deduplicated · Tracked</p>
-        <button disabled={busy||!selectedCampaign.recipients?.length||(campaignMsg.sendMode==='schedule'&&!campaignMsg.scheduledAt)}>
-         {busy ? (campaignMsg.sendMode==='schedule'?'Scheduling…':'Broadcasting…') : (campaignMsg.sendMode==='schedule'?`Schedule for ${selectedCampaign.recipients?.length||0} recipients ⏱`:(campaignMsg.isFollowUp?`Send Follow-up to ${selectedCampaign.recipients?.length||0} recipients ↩`:`Send to all ${selectedCampaign.recipients?.length||0} recipients ↗`))}
+        <button disabled={busy||!activeRecipients.length||(campaignMsg.sendMode==='schedule'&&(!campaignMsg.scheduledAt||scheduledDateConflict||isBeforeParentScheduled))}>
+         {busy ? (campaignMsg.sendMode==='schedule'?'Scheduling…':'Broadcasting…') : (campaignMsg.sendMode==='schedule'?`Schedule for ${activeRecipients.length} active recipient${activeRecipients.length===1?'':'s'} ⏱`:(campaignMsg.isFollowUp?`Send Follow-up to ${activeRecipients.length} recipient${activeRecipients.length===1?'':'s'} ↩`:`Send to all ${activeRecipients.length} recipient${activeRecipients.length===1?'':'s'} ↗`))}
         </button>
        </div>
       </form>
@@ -324,26 +446,120 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
       <div className="card">
        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'12px',flexWrap:'wrap',gap:'10px'}}>
         <div>
-         <h3 style={{margin:0}}>Recipients</h3>
-         <small className="muted">{selectedCampaign.recipients?.length||0} email address{(selectedCampaign.recipients?.length===1)?'':'es'}</small>
+         <h3 style={{margin:0}}>Campaign Recipients</h3>
+         <small className="muted">{activeRecipients.length} active / {campaignRecipients.length} total</small>
         </div>
-        {!editingRecipients&&<button className="secondary" style={{padding:'6px 14px',fontSize:'12px'}} onClick={()=>{setRecipientEditText((selectedCampaign.recipients||[]).join('\n'));setEditingRecipients(true);}}>Edit / Add emails</button>}
+        {!editingRecipients && recipientTab === 'active' && (
+         <button className="secondary" style={{padding:'6px 14px',fontSize:'12px'}} onClick={()=>{setRecipientEditText((selectedCampaign.recipients||[]).join('\n'));setEditingRecipients(true);}}>
+          Edit / Add emails
+         </button>
+        )}
        </div>
-       {!editingRecipients?(
-        <div style={{maxHeight:'220px',overflowY:'auto',background:'var(--bg)',borderRadius:'8px',padding:'12px',display:'flex',flexWrap:'wrap',gap:'6px',maxWidth:'100%',boxSizing:'border-box',overflowX:'hidden'}}>
-         {selectedCampaign.recipients?.map((addr,i)=><span key={i} className="badge recipient-tag">{addr}</span>)}
-        </div>
-       ):(
-        <div className="form">
-         <label>Edit recipient emails (one per line, comma or semicolon)
-          <textarea rows="8" value={recipientEditText} onChange={e=>setRecipientEditText(e.target.value)} placeholder="alice@example.com&#10;bob@example.com"/>
-         </label>
-         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginTop:'10px'}}>
-          <small className="muted">{parseEmailList(recipientEditText).length} valid email(s)</small>
-          <div style={{display:'flex',gap:'8px'}}>
-           <button type="button" className="secondary" style={{padding:'6px 12px',fontSize:'12px'}} onClick={()=>setEditingRecipients(false)}>Cancel</button>
-           <button type="button" style={{padding:'6px 14px',fontSize:'12px'}} disabled={busy} onClick={()=>saveRecipients(selectedCampaign)}>Save recipients</button>
+
+       <div style={{display:'flex',gap:'6px',marginBottom:'12px',borderBottom:'1px solid var(--line)',paddingBottom:'8px'}}>
+        <button 
+         type="button" 
+         className={recipientTab === 'active' ? '' : 'secondary'} 
+         style={{padding:'4px 10px',fontSize:'12px'}} 
+         onClick={()=>{setRecipientTab('active');setEditingRecipients(false);}}
+        >
+         Active Recipients ({activeRecipients.length})
+        </button>
+        <button 
+         type="button" 
+         className={recipientTab === 'unsubscribed' ? '' : 'secondary'} 
+         style={{padding:'4px 10px',fontSize:'12px'}} 
+         onClick={()=>{setRecipientTab('unsubscribed');setEditingRecipients(false);}}
+        >
+         Unsubscribed List ({campaignUnsubscribed.length})
+        </button>
+       </div>
+
+       {recipientTab === 'active' ? (
+        !editingRecipients ? (
+         <>
+          <p className="muted" style={{fontSize:'12px',margin:'0 0 8px'}}>
+           Eligible for future broadcasts and follow-ups. Click <b>⊘</b> to unsubscribe an email from this campaign.
+          </p>
+          <div style={{maxHeight:'220px',overflowY:'auto',background:'var(--bg)',borderRadius:'8px',padding:'12px',display:'flex',flexWrap:'wrap',gap:'6px',maxWidth:'100%',boxSizing:'border-box',overflowX:'hidden'}}>
+           {activeRecipients.map((addr,i)=>(
+            <span key={i} className="badge recipient-tag" style={{display:'inline-flex',alignItems:'center',gap:'6px'}}>
+             <span>{addr}</span>
+             <button 
+              type="button" 
+              style={{background:'none',border:'none',color:'#991b1b',cursor:'pointer',padding:0,fontSize:'12px',lineHeight:1}} 
+              title="Unsubscribe from this campaign (exclude from future follow-ups)"
+              onClick={async (e)=>{
+               e.stopPropagation();
+               if(confirm(`Exclude "${addr}" from future follow-up broadcasts in this campaign?`)){
+                await unsubscribeFromCampaign(addr);
+               }
+              }}
+             >
+              ⊘
+             </button>
+            </span>
+           ))}
+           {!activeRecipients.length && (
+            <span className="muted" style={{fontSize:'12px'}}>No active recipients. All recipients are either unsubscribed or in the global blacklist.</span>
+           )}
           </div>
+         </>
+        ) : (
+         <div className="form">
+          <label>Edit recipient emails (one per line, comma or semicolon)
+           <textarea rows="8" value={recipientEditText} onChange={e=>setRecipientEditText(e.target.value)} placeholder="alice@example.com&#10;bob@example.com"/>
+          </label>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginTop:'10px'}}>
+           <small className="muted">{parseEmailList(recipientEditText).length} valid email(s)</small>
+           <div style={{display:'flex',gap:'8px'}}>
+            <button type="button" className="secondary" style={{padding:'6px 12px',fontSize:'12px'}} onClick={()=>setEditingRecipients(false)}>Cancel</button>
+            <button type="button" style={{padding:'6px 14px',fontSize:'12px'}} disabled={busy} onClick={()=>saveRecipients(selectedCampaign)}>Save recipients</button>
+           </div>
+          </div>
+         </div>
+        )
+       ) : (
+        <div>
+         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'8px',flexWrap:'wrap',gap:'6px'}}>
+          <p className="muted" style={{fontSize:'12px',margin:0}}>
+           These emails are kept in the campaign, but will be <b>skipped</b> during all future broadcasts & follow-ups.
+          </p>
+          {!addingUnsub && (
+           <button type="button" className="secondary" style={{padding:'4px 10px',fontSize:'11px'}} onClick={()=>setAddingUnsub(true)}>
+            + Add to Unsubscribed
+           </button>
+          )}
+         </div>
+         {addingUnsub && (
+          <div style={{background:'var(--bg)',border:'1px solid var(--line)',borderRadius:'8px',padding:'10px',marginBottom:'10px'}}>
+           <label style={{fontSize:'12px',margin:0,display:'block'}}>Add email(s) to exclude from future follow-ups:
+            <textarea rows="3" style={{marginTop:'4px',width:'100%'}} value={unsubInput} onChange={e=>setUnsubInput(e.target.value)} placeholder="user@example.com&#10;another@example.com"/>
+           </label>
+           <div style={{display:'flex',justifyContent:'flex-end',gap:'6px',marginTop:'6px'}}>
+            <button type="button" className="secondary" style={{padding:'4px 10px',fontSize:'11px'}} onClick={()=>{setAddingUnsub(false);setUnsubInput('');}}>Cancel</button>
+            <button type="button" style={{padding:'4px 12px',fontSize:'11px'}} disabled={busy||!unsubInput.trim()} onClick={()=>unsubscribeFromCampaign(unsubInput)}>Save to Unsubscribed</button>
+           </div>
+          </div>
+         )}
+         <div style={{maxHeight:'220px',overflowY:'auto',background:'var(--bg)',borderRadius:'8px',padding:'12px',display:'flex',flexWrap:'wrap',gap:'6px',maxWidth:'100%',boxSizing:'border-box',overflowX:'hidden'}}>
+          {campaignUnsubscribed.map((addr,i)=>(
+           <span key={i} className="badge" style={{background:'#fee2e2',color:'#991b1b',display:'inline-flex',alignItems:'center',gap:'6px',fontSize:'11px'}}>
+            <span>{addr}</span>
+            <button 
+             type="button" 
+             className="link" 
+             style={{fontSize:'11px',color:'var(--green)',padding:0,fontWeight:'bold'}} 
+             title="Restore to active campaign list"
+             onClick={()=>resubscribeToCampaign(addr)}
+            >
+             ✓ Restore
+            </button>
+           </span>
+          ))}
+          {!campaignUnsubscribed.length && (
+           <span className="muted" style={{fontSize:'12px'}}>No emails in this campaign's unsubscribed list.</span>
+          )}
          </div>
         </div>
        )}
@@ -391,11 +607,9 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
              <button type="button" className="secondary batch-action-btn" style={{padding:'6px 11px',fontSize:'11px'}} onClick={()=>openBatchDetails(m.id)}>
               📊 View Batch Details
              </button>
-             {m.status!=='scheduled'&&(
-              <button type="button" className="secondary batch-action-btn" style={{padding:'6px 11px',fontSize:'11px',color:'var(--green)'}} onClick={()=>startFollowUp(m)}>
-               ↩ Send Follow-up
-              </button>
-             )}
+             <button type="button" className="secondary batch-action-btn" style={{padding:'6px 11px',fontSize:'11px',color:'var(--green)'}} onClick={()=>startFollowUp(m)}>
+              {m.status==='scheduled' ? '↩ Schedule Follow-up' : '↩ Send Follow-up'}
+             </button>
             </div>
            </div>
           );
@@ -844,27 +1058,60 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
            <th>Platform</th>
            <th>Details / Error</th>
            <th>Timestamp</th>
+           <th>Actions</th>
           </tr>
          </thead>
          <tbody>
           {(batchDetailsModal.deliveries||[])
            .filter(d => batchDeliveryFilter==='all' || d.status===batchDeliveryFilter)
            .filter(d => !batchDeliverySearch || d.recipient.toLowerCase().includes(batchDeliverySearch.toLowerCase()))
-           .map(d => (
-            <tr key={d.id}>
-             <td><b>{d.recipient}</b></td>
-             <td>
-              <span className={'badge '+(d.status==='accepted'?'green':d.status==='failed'?'danger':d.status==='suppressed'?'warning':'')}>
-               {d.status==='accepted'?'✓ Delivered':d.status==='failed'?'✕ Failed':d.status}
-              </span>
-             </td>
-             <td><span className="badge" style={{background:'#fff',border:'1px solid var(--line)'}}>{d.platform || '—'}</span></td>
-             <td style={{fontSize:'11px',color:d.error?'#a64038':'var(--muted)',maxWidth:'280px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
-              {d.error ? d.error : (d.wire_message_id ? `ID: ${d.wire_message_id}` : 'Accepted by provider')}
-             </td>
-             <td style={{fontSize:'11px',color:'var(--muted)',whiteSpace:'nowrap'}}>{fmt(d.created_at)}</td>
-            </tr>
-           ))}
+           .map(d => {
+            const isUnsub = unsubscribedSet.has(d.recipient.toLowerCase());
+            return (
+             <tr key={d.id}>
+              <td><b>{d.recipient}</b></td>
+              <td>
+               <span className={'badge '+(d.status==='accepted'?'green':d.status==='failed'?'danger':d.status==='suppressed'?'warning':'')}>
+                {d.status==='accepted'?'✓ Delivered':d.status==='failed'?'✕ Failed':d.status}
+               </span>
+              </td>
+              <td><span className="badge" style={{background:'#fff',border:'1px solid var(--line)'}}>{d.platform || '—'}</span></td>
+              <td style={{fontSize:'11px',color:d.error?'#a64038':'var(--muted)',maxWidth:'280px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+               {d.error ? d.error : (d.wire_message_id ? `ID: ${d.wire_message_id}` : 'Accepted by provider')}
+              </td>
+              <td style={{fontSize:'11px',color:'var(--muted)',whiteSpace:'nowrap'}}>{fmt(d.created_at)}</td>
+              <td>
+               {isUnsub ? (
+                <div style={{display:'flex',alignItems:'center',gap:'6px'}}>
+                 <span className="badge" style={{background:'#fee2e2',color:'#991b1b',fontSize:'10px'}}>Unsubscribed</span>
+                 <button 
+                  type="button" 
+                  className="link" 
+                  style={{fontSize:'11px',color:'var(--green)'}}
+                  onClick={()=>resubscribeToCampaign(d.recipient)}
+                 >
+                  Restore
+                 </button>
+                </div>
+               ) : (
+                <button 
+                 type="button" 
+                 className="link danger" 
+                 style={{fontSize:'11px'}}
+                 title="Exclude from future follow-up broadcasts for this campaign"
+                 onClick={async()=>{
+                  if(confirm(`Exclude "${d.recipient}" from future follow-ups for this campaign?`)){
+                   await unsubscribeFromCampaign(d.recipient);
+                  }
+                 }}
+                >
+                 ⊘ Exclude from follow-ups
+                </button>
+               )}
+              </td>
+             </tr>
+            );
+           })}
          </tbody>
         </table>
        </div>
