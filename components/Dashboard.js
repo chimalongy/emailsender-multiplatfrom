@@ -583,8 +583,34 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
      <div className="campaign-meta-actions">
       <span className="badge green">{activeRecipients.length} active recipient{(activeRecipients.length===1)?'':'s'}</span>
       {campaignUnsubscribed.length > 0 && <span className="badge" style={{background:'#fee2e2',color:'#991b1b'}}>{campaignUnsubscribed.length} unsubscribed</span>}
+      <button 
+       type="button" 
+       className="secondary" 
+       style={{display:'inline-flex',alignItems:'center',gap:'6px',fontWeight:'600',padding:'6px 14px',fontSize:'13px'}} 
+       onClick={()=>router.push('/campaigns/'+campaignSlug(selectedCampaign)+'/replies')}
+      >
+       <FiMessageSquare size={14} style={{color:'var(--green)'}}/> View Replies {campaignRepliesCounts[selectedCampaign.id] !== undefined ? `(${campaignRepliesCounts[selectedCampaign.id]})` : ''} →
+      </button>
       <button type="button" className="btn-delete" disabled={busy} onClick={()=>deleteCampaign(selectedCampaign)}><FiTrash2 size={13}/> Delete Campaign</button>
      </div>
+    </div>
+    <div className="campaign-subnav-tabs" style={{display:'flex',gap:'8px',marginBottom:'18px',borderBottom:'1px solid var(--line)',paddingBottom:'10px'}}>
+     <button 
+      type="button" 
+      className={page==='Campaigns' ? '' : 'secondary'}
+      style={{display:'inline-flex',alignItems:'center',gap:'6px',fontSize:'13px',padding:'7px 14px',fontWeight:'600'}}
+      onClick={()=>router.push(`/campaigns/${campaignSlug(selectedCampaign)}`)}
+     >
+      📢 Broadcast Composer & History
+     </button>
+     <button 
+      type="button" 
+      className={page==='CampaignReplies' ? '' : 'secondary'}
+      style={{display:'inline-flex',alignItems:'center',gap:'6px',fontSize:'13px',padding:'7px 14px',fontWeight:'600'}}
+      onClick={()=>router.push(`/campaigns/${campaignSlug(selectedCampaign)}/replies`)}
+     >
+      <FiMessageSquare size={14}/> Inbound Replies {campaignRepliesCounts[selectedCampaign.id] !== undefined ? `(${campaignRepliesCounts[selectedCampaign.id]})` : ''}
+     </button>
     </div>
     <div className="columns">
      <form className="card form composer" onSubmit={sendCampaignBroadcast}>
@@ -916,6 +942,18 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
          </div>
          <div className="campaign-card-footer" onClick={e=>e.stopPropagation()}>
           <button onClick={()=>selectCampaign(c)}>Open campaign & send →</button>
+          <button 
+           type="button" 
+           className="secondary" 
+           style={{display:'inline-flex',alignItems:'center',gap:'5px',padding:'6px 12px',fontSize:'12px'}}
+           onClick={e=>{
+            e.stopPropagation();
+            selectCampaign(c);
+            router.push('/campaigns/'+campaignSlug(c)+'/replies');
+           }}
+          >
+           <FiMessageSquare size={12}/> Replies {campaignRepliesCounts[c.id] !== undefined ? `(${campaignRepliesCounts[c.id]})` : ''}
+          </button>
           <button type="button" className="btn-delete" disabled={busy} onClick={()=>deleteCampaign(c)}><FiTrash2 size={13}/> Delete</button>
          </div>
         </div>
@@ -955,6 +993,180 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
    </div>
   )}
  </>}
+ {page==='CampaignReplies'&&selectedCampaign&&(
+   <div>
+    <div className="campaign-header-row">
+     <div className="campaign-title-group">
+      <button className="secondary" onClick={()=>router.push(`/campaigns/${campaignSlug(selectedCampaign)}`)}>← Back to Broadcasts</button>
+      <h2>{selectedCampaign.name}</h2>
+      <span className="campaign-slug-badge">/campaigns/{campaignSlug(selectedCampaign)}/replies</span>
+     </div>
+     <div className="campaign-meta-actions">
+      <span className="badge green">{activeRecipients.length} active recipient{(activeRecipients.length===1)?'':'s'}</span>
+      <button 
+       type="button" 
+       className="secondary" 
+       onClick={()=>loadCampaignReplies(selectedCampaign.id)} 
+       disabled={campaignRepliesLoading} 
+       style={{display:'inline-flex',alignItems:'center',gap:'6px'}}
+      >
+       <FiRefreshCw size={12} className={campaignRepliesLoading ? 'spin' : ''}/> Refresh
+      </button>
+     </div>
+    </div>
+
+    <div className="campaign-subnav-tabs" style={{display:'flex',gap:'8px',marginBottom:'18px',borderBottom:'1px solid var(--line)',paddingBottom:'10px'}}>
+     <button 
+      type="button" 
+      className="secondary"
+      style={{display:'inline-flex',alignItems:'center',gap:'6px',fontSize:'13px',padding:'7px 14px'}}
+      onClick={()=>router.push(`/campaigns/${campaignSlug(selectedCampaign)}`)}
+     >
+      📢 Broadcast Composer & History
+     </button>
+     <button 
+      type="button" 
+      style={{display:'inline-flex',alignItems:'center',gap:'6px',fontSize:'13px',padding:'7px 14px',fontWeight:'600'}}
+      onClick={()=>router.push(`/campaigns/${campaignSlug(selectedCampaign)}/replies`)}
+     >
+      <FiMessageSquare size={14}/> Inbound Replies ({campaignReplies.length})
+     </button>
+    </div>
+
+    {(() => {
+      const filteredReplies = campaignReplies
+       .filter(r => {
+         if (campaignRepliesFilter === 'human') return !r.is_auto_reply;
+         if (campaignRepliesFilter === 'auto') return r.is_auto_reply;
+         return true;
+       })
+       .filter(r => {
+         if (!campaignRepliesSearch) return true;
+         const q = campaignRepliesSearch.toLowerCase();
+         return (
+           (r.from_email || '').toLowerCase().includes(q) ||
+           (r.from_name || '').toLowerCase().includes(q) ||
+           (r.subject || '').toLowerCase().includes(q) ||
+           (r.text_body || '').toLowerCase().includes(q) ||
+           (r.matched_recipient || '').toLowerCase().includes(q)
+         );
+       });
+
+      const humanCount = campaignReplies.filter(r => !r.is_auto_reply).length;
+      const autoCount = campaignReplies.filter(r => r.is_auto_reply).length;
+
+      return (
+       <>
+        <div className="sectiontitle" style={{marginBottom:'14px',flexWrap:'wrap',gap:'10px'}}>
+         <div className="tabs" style={{display:'flex',gap:'6px',flexWrap:'wrap'}}>
+          {[
+            { id: 'all', label: `All Replies (${campaignReplies.length})` },
+            { id: 'human', label: `Direct / Human (${humanCount})` },
+            { id: 'auto', label: `Auto-Replies / DSN (${autoCount})` },
+          ].map(tab => (
+           <button
+            key={tab.id}
+            type="button"
+            className={campaignRepliesFilter === tab.id ? 'selected' : ''}
+            onClick={() => setCampaignRepliesFilter(tab.id)}
+            style={{fontSize:'12px',padding:'6px 12px'}}
+           >
+            {tab.label}
+           </button>
+          ))}
+         </div>
+         <input
+          type="search"
+          placeholder="Filter replies by sender, subject…"
+          value={campaignRepliesSearch}
+          onChange={e => setCampaignRepliesSearch(e.target.value)}
+          style={{width:'240px',padding:'6px 10px',fontSize:'12px'}}
+         />
+        </div>
+
+        {campaignRepliesLoading && !campaignReplies.length ? (
+         <div className="card" style={{padding:'40px',textAlign:'center',color:'var(--muted)'}}>
+          <FiRefreshCw size={24} className="spin" style={{margin:'0 auto 10px',display:'block'}}/>
+          <p style={{margin:0}}>Loading inbound replies for {selectedCampaign.name}…</p>
+         </div>
+        ) : !campaignReplies.length ? (
+         <div className="empty card" style={{padding:'40px'}}>
+          <div className="emptyicon">💬</div>
+          <h2>No inbound replies yet for "{selectedCampaign.name}"</h2>
+          <p>When recipients reply to broadcast emails from this campaign, their responses will automatically be routed and displayed here.</p>
+          <div style={{marginTop:'16px'}}>
+           <button type="button" onClick={()=>router.push(`/campaigns/${campaignSlug(selectedCampaign)}`)}>
+            ← Return to Broadcast Composer
+           </button>
+          </div>
+         </div>
+        ) : !filteredReplies.length ? (
+         <div className="card" style={{padding:'30px',textAlign:'center',color:'var(--muted)'}}>
+          <p style={{margin:0}}>No replies match your current filter.</p>
+         </div>
+        ) : (
+         <div className="mailcolumns">
+          <section className="card maillist">
+           {filteredReplies.map(r => {
+            const isSelected = selectedThreadId === r.thread_id || selectedReplyId === r.id;
+            return (
+             <div key={r.id} className={`mail-accordion-item ${isSelected ? 'expanded' : ''}`}>
+              <button
+               type="button"
+               onClick={() => {
+                setSelectedReplyId(r.id);
+                openThread(r.thread_id);
+               }}
+               className={`mailrow ${isSelected ? 'selected-row' : ''}`}
+               aria-expanded={isSelected}
+              >
+               <div className="mailrow-header">
+                <b className="mailrow-contact" style={{display:'flex',alignItems:'center',gap:'6px'}}>
+                 {r.from_name ? r.from_name : r.from_email}
+                </b>
+                <div className="mailrow-meta">
+                 <time style={{fontSize:'11px'}}>{new Date(r.created_at).toLocaleDateString()}</time>
+                 <span className={`accordion-chevron ${isSelected ? 'open' : ''}`}>{isSelected ? '▲' : '▼'}</span>
+                </div>
+               </div>
+               <div style={{fontSize:'11px',color:'var(--muted)',marginBottom:'4px'}}>
+                {r.from_name ? `<${r.from_email}>` : ''} 
+                {r.matched_recipient && r.matched_recipient.toLowerCase() !== r.from_email.toLowerCase() ? ` (via ${r.matched_recipient})` : ''}
+               </div>
+               <p className="mailrow-subject" style={{fontWeight: r.read_at ? 'normal' : '600'}}>
+                {r.subject || '(No subject)'}
+               </p>
+               <div style={{fontSize:'11.5px',color:'var(--muted)',maxHeight:'34px',overflow:'hidden',textOverflow:'ellipsis',display:'-webkit-box',WebkitLineClamp:2,WebkitBoxOrient:'vertical',marginBottom:'6px'}}>
+                {r.text_body || 'HTML message'}
+               </div>
+               <div className="mailrow-footer" style={{display:'flex',alignItems:'center',gap:'6px',justifyContent:'space-between'}}>
+                <span className={`badge ${r.is_auto_reply ? '' : 'green'}`} style={{fontSize:'10px'}}>
+                 {r.is_auto_reply ? 'Auto-reply / DSN' : 'Direct Response'}
+                </span>
+                <span style={{fontSize:'10px',color:'var(--muted)'}}>
+                 {fmt(r.created_at)}
+                </span>
+               </div>
+              </button>
+              {isSelected && (
+               <div className="mail-accordion-panel mobile-only">
+                {renderThreadContent()}
+               </div>
+              )}
+             </div>
+            );
+           })}
+          </section>
+          <section className="mailbox-desktop-thread desktop-only">
+           {renderThreadContent()}
+          </section>
+         </div>
+        )}
+       </>
+      );
+    })()}
+   </div>
+  )}
  {page==='Schedules'&&(()=>{
   const monthNames=['January','February','March','April','May','June','July','August','September','October','November','December'];
   const daysInMonth=new Date(calYear,calMonth,0).getDate();
