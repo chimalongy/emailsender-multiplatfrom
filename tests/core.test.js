@@ -8,6 +8,7 @@ import {buildRequest,sendEmail} from '../lib/providers.js';
 import {email,domain,parseEmailList,campaignSlug,matchesCampaign} from '../lib/validation.js';
 import {parseLocalDateTimeInTz,formatDateInTz,toLocalDateStr,toLocalDatetimeInputStr} from '../lib/timezone.js';
 import {isFcmConfigured, getPublicFcmConfig, sendFcmPushToAll} from '../lib/fcm.js';
+import {extractBouncedRecipient, isBounceMessage, handleCampaignBounce} from '../lib/bounce-handler.js';
 test('credentials store as JSON and decrypt accurately',()=>{const a=encrypt({apiKey:'secret'});assert.deepEqual(decrypt(a),{apiKey:'secret'});});
 test('session validates and expires',()=>{const s=session();assert.ok(validSession(s));assert.ok(!validSession('expired'));});
 
@@ -413,6 +414,125 @@ test('campaign replies matching isolates responses for a specific campaign by th
   assert.equal(matchedForA[0].id, 'in-1');
   assert.equal(matchedForA[0].from_email, 'bill@example.com');
 });
+
+test('bounce detector accurately extracts bounced recipients from various NDR formats', () => {
+  // Google NDR
+  const googleBounce = {
+    from_email: 'mailer-daemon@googlemail.com',
+    subject: 'Delivery Status Notification (Failure)',
+    text_body: "Your message wasn't delivered to wealthmanagement@bankofamerica.com because the address couldn't be found."
+  };
+  assert.equal(isBounceMessage(googleBounce), true);
+  assert.equal(extractBouncedRecipient(googleBounce), 'wealthmanagement@bankofamerica.com');
+
+  // Microsoft 365 Exchange NDR
+  const msBounce = {
+    from_email: 'postmaster@outlook.com',
+    subject: 'Undeliverable: Domain inquiry',
+    text_body: "Your message to mark@sgfloans.com couldn't be delivered. The recipient's email address wasn't found on the destination domain."
+  };
+  assert.equal(isBounceMessage(msBounce), true);
+  assert.equal(extractBouncedRecipient(msBounce), 'mark@sgfloans.com');
+
+  // Postfix / RFC 3464
+  const postfixBounce = {
+    from_email: 'MAILER-DAEMON@mail.server.com',
+    subject: 'Returned mail: see transcript for details',
+    text_body: 'The following address had permanent fatal errors -----\n<mark.bidinger@se.com>\n(reason: 550 User unknown)'
+  };
+  assert.equal(isBounceMessage(postfixBounce), true);
+  assert.equal(extractBouncedRecipient(postfixBounce), 'mark.bidinger@se.com');
+
+  // VERP return path
+  const verpBounce = {
+    to_email: 'bounce+batch123-client=domain.com@orlandoprivatelender.com',
+    from_email: 'mailer-daemon@relay.net',
+    subject: 'failure notice',
+    text_body: 'Remote host said: 550 No such user'
+  };
+  assert.equal(isBounceMessage(verpBounce), true);
+  assert.equal(extractBouncedRecipient(verpBounce), 'client@domain.com');
+
+  // Normal human email
+  const normalMsg = {
+    from_email: 'john@company.com',
+    subject: 'Thanks for reaching out',
+    text_body: "Let's schedule a call tomorrow."
+  };
+  assert.equal(isBounceMessage(normalMsg), false);
+  assert.equal(extractBouncedRecipient(normalMsg), null);
+});
+
+test('handleCampaignBounce automatically removes bounced recipient from campaign recipients and places them on unsubscribed list', async () => {
+  const pg = new PGlite();
+  await pg.exec(await readFile(new URL('../db/schema.sql', import.meta.url), 'utf8'));
+
+  const sqlTag = async (strings, ...values) => {
+    let query = strings[0];
+    const params = [];
+    for (let i = 0; i < values.length; i++) {
+      params.push(values[i]);
+      query += `$${i + 1}` + strings[i + 1];
+    }
+    const res = await pg.query(query, params);
+    return res.rows;
+  };
+
+  const campId = randomUUID();
+  await pg.query(`
+    INSERT INTO campaigns(id, name, recipients, unsubscribed)
+    VALUES($1, 'Orlando Private Lender', '["wealthmanagement@bankofamerica.com", "active@client.com"]', '[]')
+  `, [campId]);
+
+  const batchId = randomUUID();
+  await pg.query(`
+    INSERT INTO campaign_messages(id, campaign_id, subject, text_body, total_recipients, sent_count, failed_count, status)
+    VALUES($1, $2, 'Lender Inquiry', 'Text', 2, 2, 0, 'completed')
+  `, [batchId, campId]);
+
+  const delivId = randomUUID(), delivId2 = randomUUID();
+  await pg.query(`
+    INSERT INTO campaign_deliveries(id, campaign_message_id, recipient, message_uuid, platform, status)
+    VALUES($1, $2, 'wealthmanagement@bankofamerica.com', $3, 'Resend', 'accepted')
+  `, [delivId, batchId, randomUUID()]);
+  await pg.query(`
+    INSERT INTO campaign_deliveries(id, campaign_message_id, recipient, message_uuid, platform, status)
+    VALUES($1, $2, 'active@client.com', $3, 'Resend', 'accepted')
+  `, [delivId2, batchId, randomUUID()]);
+
+  // Execute handleCampaignBounce
+  const result = await handleCampaignBounce(sqlTag, {
+    recipientEmail: 'wealthmanagement@bankofamerica.com',
+    reason: '550 5.1.1 Mailbox does not exist'
+  });
+
+  assert.equal(result.recipientEmail, 'wealthmanagement@bankofamerica.com');
+  assert.equal(result.bouncedDeliveriesCount, 1);
+
+  // Verify removed from recipients and placed on unsubscribed
+  const camp = (await pg.query('SELECT * FROM campaigns WHERE id=$1', [campId])).rows[0];
+  assert.deepEqual(camp.recipients, ['active@client.com']);
+  assert.deepEqual(camp.unsubscribed, ['wealthmanagement@bankofamerica.com']);
+
+  // Verify campaign delivery marked as bounced
+  const delivery = (await pg.query('SELECT * FROM campaign_deliveries WHERE id=$1', [delivId])).rows[0];
+  assert.equal(delivery.status, 'bounced');
+  assert.ok(delivery.error.includes('550 5.1.1'));
+
+  // Verify batch metrics updated
+  const batch = (await pg.query('SELECT * FROM campaign_messages WHERE id=$1', [batchId])).rows[0];
+  assert.equal(batch.sent_count, 1);
+  assert.equal(batch.failed_count, 1);
+  assert.equal(batch.status, 'partial');
+
+  // Verify added to blacklist
+  const bl = (await pg.query('SELECT * FROM blacklist WHERE email=$1', ['wealthmanagement@bankofamerica.com'])).rows[0];
+  assert.ok(bl);
+  assert.ok(bl.reason.includes('Automated Bounce'));
+
+  await pg.close();
+});
+
 
 
 

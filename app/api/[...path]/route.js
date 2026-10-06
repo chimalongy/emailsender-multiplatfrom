@@ -12,6 +12,7 @@ import { Client as QStashClient, Receiver as QStashReceiver } from '@upstash/qst
 import { dispatchCampaignMessage } from '../../../lib/campaign-dispatcher.js';
 import { DEFAULT_TIMEZONE, parseLocalDateTimeInTz, formatDateInTz } from '../../../lib/timezone.js';
 import { isFcmConfigured, getPublicFcmConfig, sendFcmPushToAll } from '../../../lib/fcm.js';
+import { handleCampaignBounce, extractBouncedRecipient, isBounceMessage, scanAndProcessAllBounces } from '../../../lib/bounce-handler.js';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
@@ -118,7 +119,7 @@ async function state() {
 async function webhook(provider, req, raw) {
     const sql = db(); const [c] = await sql`SELECT * FROM connections WHERE provider=${provider}`; if (!c) fail('Unknown webhook', 404);
     const credentials = decrypt(c.credentials); if (!credentials.webhookSecret) fail('Webhook disabled', 403);
-    let event, id, status;
+    let event, id, status, bounceRecipient;
     if (provider === 'resend') {
         const timestamp = req.headers.get('svix-timestamp'), eventId = req.headers.get('svix-id');
         if (Math.abs(Date.now() / 1000 - Number(timestamp)) > 300) fail('Expired signature', 401);
@@ -126,12 +127,26 @@ async function webhook(provider, req, raw) {
         const expected = createHmac('sha256', key).update(`${eventId}.${timestamp}.${raw}`).digest('base64');
         if (!(req.headers.get('svix-signature') || '').split(' ').some(s => equal(s, `v1,${expected}`))) fail('Invalid signature', 401);
         event = JSON.parse(raw); id = event.data?.email_id; status = ({ 'email.delivered': 'delivered', 'email.bounced': 'bounced', 'email.complained': 'complained', 'email.failed': 'failed-delivery' })[event.type];
+        if (status === 'bounced' || status === 'complained') {
+            bounceRecipient = (Array.isArray(event.data?.to) ? event.data.to[0] : event.data?.to) || event.data?.recipient || event.data?.email;
+        }
     } else if (provider === 'mailgun') {
         event = JSON.parse(raw); const s = event.signature || {};
         if (Math.abs(Date.now() / 1000 - Number(s.timestamp)) > 300 || !equal(createHmac('sha256', credentials.webhookSecret).update(`${s.timestamp}${s.token}`).digest('hex'), s.signature || '')) fail('Invalid signature', 401);
         const e = event['event-data']; id = e?.message?.headers?.['message-id']; status = ({ delivered: 'delivered', complained: 'complained', failed: e?.severity === 'permanent' ? 'bounced' : undefined })[e?.event];
+        if (status === 'bounced' || status === 'complained') {
+            bounceRecipient = e?.recipient;
+        }
     } else fail('Webhook not supported', 404);
     if (id && status) await messageStore('webhookUpdate',{connectionId:c.id,providerId:id,status});
+    if (bounceRecipient && status === 'bounced') {
+        try {
+            await ensureCampaignTables(sql);
+            await handleCampaignBounce(sql, { recipientEmail: bounceRecipient, reason: `Provider webhook bounce (${provider})` });
+        } catch (bErr) {
+            console.error('Webhook bounce handling failed', bErr);
+        }
+    }
     return json({ ok: true });
 }
 async function handler(req, { params }) {
@@ -192,6 +207,16 @@ async function handler(req, { params }) {
             const body = data.subject ? `Subject: ${data.subject}` : (data.snippet || 'You received a new email.');
             const sql = db();
             await ensureCampaignTables(sql);
+
+            // Auto-detect NDR / mailer-daemon bounce notifications and update campaign recipients + unsubscribed lists
+            if (isBounceMessage({ from_email: data.from, subject: data.subject, text_body: data.snippet })) {
+                try {
+                    await scanAndProcessAllBounces(sql, messageStore);
+                } catch (bErr) {
+                    console.error('Auto bounce scan failed on inbound notify', bErr);
+                }
+            }
+
             const dispatched = await sendFcmPushToAll({
                 title,
                 body,
@@ -231,9 +256,16 @@ async function handler(req, { params }) {
             `;
             return json({ batch, deliveries });
         }
+        if (req.method === 'POST' && path === 'campaigns/sync-bounces') {
+            const sql = db();
+            await ensureCampaignTables(sql);
+            const syncResult = await scanAndProcessAllBounces(sql, messageStore);
+            return json({ ok: true, ...syncResult });
+        }
         if (req.method === 'GET' && path === 'campaigns/replies') {
             const sql = db();
             await ensureCampaignTables(sql);
+            await scanAndProcessAllBounces(sql, messageStore).catch(e => console.error('Auto bounce scan in replies failed', e));
             const url = new URL(req.url);
             const campaignId = url.searchParams.get('id');
             const slug = url.searchParams.get('slug');

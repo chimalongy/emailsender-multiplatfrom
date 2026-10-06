@@ -24,8 +24,12 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
  };
  const pathToTab=p=>{
   if(!p)return null;
-  const s=p.replace(/^\//,'').split('/')[0].toLowerCase();
-  if(s==='campaigns')return 'Campaigns';
+  const parts=p.replace(/^\//,'').split('/');
+  const s=parts[0]?.toLowerCase();
+  if(s==='campaigns'){
+   if(parts[2]?.toLowerCase()==='replies') return 'CampaignReplies';
+   return 'Campaigns';
+  }
   if(s==='blacklist')return 'Blacklist';
   if(s==='schedules')return 'Schedules';
   if(s==='connected'||s==='connections')return 'Connected';
@@ -153,6 +157,11 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
    if(found&&selectedCampaignId!==found.id){
     setSelectedCampaignId(found.id);
     setRecipientEditText((found.recipients||[]).join('\n'));
+   }
+   if(parts[2]?.toLowerCase()==='replies'){
+    setPage('CampaignReplies');
+   }else{
+    setPage('Campaigns');
    }
   }else if(parts[0]==='campaigns'&&!parts[1]&&selectedCampaignId){
    setSelectedCampaignId(null);
@@ -587,7 +596,7 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
        type="button" 
        className="secondary" 
        style={{display:'inline-flex',alignItems:'center',gap:'6px',fontWeight:'600',padding:'6px 14px',fontSize:'13px'}} 
-       onClick={()=>router.push('/campaigns/'+campaignSlug(selectedCampaign)+'/replies')}
+       onClick={()=>{setPage('CampaignReplies');router.push('/campaigns/'+campaignSlug(selectedCampaign)+'/replies');}}
       >
        <FiMessageSquare size={14} style={{color:'var(--green)'}}/> View Replies {campaignRepliesCounts[selectedCampaign.id] !== undefined ? `(${campaignRepliesCounts[selectedCampaign.id]})` : ''} →
       </button>
@@ -599,7 +608,7 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
       type="button" 
       className={page==='Campaigns' ? '' : 'secondary'}
       style={{display:'inline-flex',alignItems:'center',gap:'6px',fontSize:'13px',padding:'7px 14px',fontWeight:'600'}}
-      onClick={()=>router.push(`/campaigns/${campaignSlug(selectedCampaign)}`)}
+      onClick={()=>{setPage('Campaigns');router.push(`/campaigns/${campaignSlug(selectedCampaign)}`);}}
      >
       📢 Broadcast Composer & History
      </button>
@@ -607,7 +616,7 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
       type="button" 
       className={page==='CampaignReplies' ? '' : 'secondary'}
       style={{display:'inline-flex',alignItems:'center',gap:'6px',fontSize:'13px',padding:'7px 14px',fontWeight:'600'}}
-      onClick={()=>router.push(`/campaigns/${campaignSlug(selectedCampaign)}/replies`)}
+      onClick={()=>{setPage('CampaignReplies');router.push(`/campaigns/${campaignSlug(selectedCampaign)}/replies`);}}
      >
       <FiMessageSquare size={14}/> Inbound Replies {campaignRepliesCounts[selectedCampaign.id] !== undefined ? `(${campaignRepliesCounts[selectedCampaign.id]})` : ''}
      </button>
@@ -997,7 +1006,7 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
    <div>
     <div className="campaign-header-row">
      <div className="campaign-title-group">
-      <button className="secondary" onClick={()=>router.push(`/campaigns/${campaignSlug(selectedCampaign)}`)}>← Back to Broadcasts</button>
+      <button className="secondary" onClick={()=>{setPage('Campaigns');router.push(`/campaigns/${campaignSlug(selectedCampaign)}`);}}>← Back to Broadcasts</button>
       <h2>{selectedCampaign.name}</h2>
       <span className="campaign-slug-badge">/campaigns/{campaignSlug(selectedCampaign)}/replies</span>
      </div>
@@ -1020,14 +1029,14 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
       type="button" 
       className="secondary"
       style={{display:'inline-flex',alignItems:'center',gap:'6px',fontSize:'13px',padding:'7px 14px'}}
-      onClick={()=>router.push(`/campaigns/${campaignSlug(selectedCampaign)}`)}
+      onClick={()=>{setPage('Campaigns');router.push(`/campaigns/${campaignSlug(selectedCampaign)}`);}}
      >
       📢 Broadcast Composer & History
      </button>
      <button 
       type="button" 
       style={{display:'inline-flex',alignItems:'center',gap:'6px',fontSize:'13px',padding:'7px 14px',fontWeight:'600'}}
-      onClick={()=>router.push(`/campaigns/${campaignSlug(selectedCampaign)}/replies`)}
+      onClick={()=>{setPage('CampaignReplies');router.push(`/campaigns/${campaignSlug(selectedCampaign)}/replies`);}}
      >
       <FiMessageSquare size={14}/> Inbound Replies ({campaignReplies.length})
      </button>
@@ -1095,7 +1104,7 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
           <h2>No inbound replies yet for "{selectedCampaign.name}"</h2>
           <p>When recipients reply to broadcast emails from this campaign, their responses will automatically be routed and displayed here.</p>
           <div style={{marginTop:'16px'}}>
-           <button type="button" onClick={()=>router.push(`/campaigns/${campaignSlug(selectedCampaign)}`)}>
+           <button type="button" onClick={()=>{setPage('Campaigns');router.push(`/campaigns/${campaignSlug(selectedCampaign)}`);}}>
             ← Return to Broadcast Composer
            </button>
           </div>
