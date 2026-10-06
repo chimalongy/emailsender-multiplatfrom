@@ -1,10 +1,10 @@
 'use client';
-import {useEffect,useState,useMemo} from 'react';
+import {useEffect,useState,useMemo,Fragment} from 'react';
 import {useRouter,usePathname} from 'next/navigation';
 import {providers} from '../lib/catalog.js';
 import {parseEmailList, campaignSlug, matchesCampaign} from '../lib/validation.js';
 import {toLocalDatetimeInputStr, toLocalDateStr} from '../lib/timezone.js';
-import {FiTrash2} from 'react-icons/fi';
+import {FiTrash2, FiRefreshCw, FiUserX, FiChevronDown, FiChevronRight, FiAlertTriangle} from 'react-icons/fi';
 import {registerPushDevice, unregisterPushDevice, getLocalDevicePushState} from '../lib/firebase-client.js';
 const fmt=d=>new Date(d).toLocaleString();
 async function api(path,body){const r=await fetch('/api/'+path,body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const d=await r.json();if(r.status===401){location.href='/login';throw Error('Sign in required');}if(!r.ok&&!(path==='send'&&d.status==='failed'))throw Error(d.error||'Request failed');return d;}
@@ -53,6 +53,7 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
  const [selectedCampaignId,setSelectedCampaignId]=useState(null),[campaignForm,setCampaignForm]=useState({name:'',emails:''}),[campaignMsg,setCampaignMsg]=useState({personaId:'',subject:'',text:'',sendMode:'now',scheduledAt:'',isFollowUp:false,parentBatchId:null}),[editingRecipients,setEditingRecipients]=useState(false),[recipientEditText,setRecipientEditText]=useState('');
  const [recipientTab,setRecipientTab]=useState('active'),[unsubInput,setUnsubInput]=useState(''),[addingUnsub,setAddingUnsub]=useState(false);
  const [batchDetailsModal,setBatchDetailsModal]=useState(null),[batchDetailsLoading,setBatchDetailsLoading]=useState(false),[batchDeliveryFilter,setBatchDeliveryFilter]=useState('all'),[batchDeliverySearch,setBatchDeliverySearch]=useState('');
+ const [expandedDeliveryId,setExpandedDeliveryId]=useState(null),[resendingDeliveryId,setResendingDeliveryId]=useState(null),[deletingDeliveryId,setDeletingDeliveryId]=useState(null);
  const [calMonth,setCalMonth]=useState(new Date().getMonth()+1);
  const [calYear,setCalYear]=useState(new Date().getFullYear());
  const [calData,setCalData]=useState(null);
@@ -270,24 +271,26 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
   setUnsubInput('');
   router.push('/campaigns');
  }
- async function unsubscribeFromCampaign(emailOrList){
-  if(!selectedCampaign)return;
+ async function unsubscribeFromCampaign(emailOrList, campaignId = null){
+  const targetId = campaignId || selectedCampaign?.id || batchDetailsModal?.batch?.campaign_id;
+  if(!targetId)return;
   const list=parseEmailList(emailOrList);
   if(!list.length){setError('Please enter at least one valid email address to unsubscribe.');return;}
   await run(async()=>{
-   const res=await api('campaigns/unsubscribe',{campaignId:selectedCampaign.id,emails:list});
+   const res=await api('campaigns/unsubscribe',{campaignId:targetId,emails:list});
    await refresh();
    setAddingUnsub(false);
    setUnsubInput('');
    setNotice(`Added ${res.addedCount||list.length} recipient${(res.addedCount||list.length)===1?'':'s'} to the campaign unsubscribed list. Future follow-ups will exclude them.`);
   });
  }
- async function resubscribeToCampaign(emailOrList){
-  if(!selectedCampaign)return;
+ async function resubscribeToCampaign(emailOrList, campaignId = null){
+  const targetId = campaignId || selectedCampaign?.id || batchDetailsModal?.batch?.campaign_id;
+  if(!targetId)return;
   const list=parseEmailList(emailOrList);
   if(!list.length)return;
   await run(async()=>{
-   const res=await api('campaigns/resubscribe',{campaignId:selectedCampaign.id,emails:list});
+   const res=await api('campaigns/resubscribe',{campaignId:targetId,emails:list});
    await refresh();
    setNotice(`Restored ${res.removedCount||list.length} recipient${(res.removedCount||list.length)===1?'':'s'} back to active campaign list.`);
   });
@@ -339,6 +342,9 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
   setBatchDetailsModal(null);
   setBatchDeliveryFilter('all');
   setBatchDeliverySearch('');
+  setExpandedDeliveryId(null);
+  setResendingDeliveryId(null);
+  setDeletingDeliveryId(null);
   try{
    const res=await api(`campaigns/batch-details?id=${batchId}`);
    setBatchDetailsModal(res);
@@ -346,6 +352,63 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
    setError(e.message);
   }finally{
    setBatchDetailsLoading(false);
+  }
+ }
+ async function resendDelivery(delivery){
+  if(resendingDeliveryId)return;
+  setResendingDeliveryId(delivery.id);
+  setError('');
+  setNotice('');
+  try{
+   const res=await api('campaigns/resend-delivery',{deliveryId:delivery.id});
+   setBatchDetailsModal(prev=>{
+    if(!prev)return prev;
+    const updatedDeliveries=(prev.deliveries||[]).map(d=>{
+     if(d.id===delivery.id){
+      return res.delivery;
+     }
+     return d;
+    });
+    return {
+     ...prev,
+     batch:res.batch || {
+      ...prev.batch,
+      sent_count:(prev.batch?.sent_count||0)+1,
+      failed_count:Math.max(0,(prev.batch?.failed_count||1)-1),
+      status:(prev.batch?.failed_count||1)<=1?'completed':'partial'
+     },
+     deliveries:updatedDeliveries
+    };
+   });
+   setNotice(`✅ Successfully resent email to ${delivery.recipient}! Moved to Delivered.`);
+   refresh().catch(()=>{});
+  }catch(err){
+   setError(err.message||'Failed to resend email');
+  }finally{
+   setResendingDeliveryId(null);
+  }
+ }
+ async function deleteDelivery(delivery){
+  if(!confirm(`Delete delivery log for "${delivery.recipient}"?`))return;
+  setDeletingDeliveryId(delivery.id);
+  setError('');
+  setNotice('');
+  try{
+   const res=await api('campaigns/delete-delivery',{deliveryId:delivery.id});
+   setBatchDetailsModal(prev=>{
+    if(!prev)return prev;
+    return {
+     ...prev,
+     batch:res.batch||prev.batch,
+     deliveries:(prev.deliveries||[]).filter(d=>d.id!==delivery.id)
+    };
+   });
+   setNotice(`Deleted delivery log for "${delivery.recipient}".`);
+   refresh().catch(()=>{});
+  }catch(err){
+   setError(err.message||'Failed to delete delivery log');
+  }finally{
+   setDeletingDeliveryId(null);
   }
  }
  function startFollowUp(m){
@@ -1201,65 +1264,217 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
         <table className="delivery-table">
          <thead>
           <tr>
+           <th style={{width:'34px'}}></th>
            <th>Recipient</th>
            <th>Status</th>
            <th>Platform</th>
            <th>Details / Error</th>
            <th>Timestamp</th>
-           <th>Actions</th>
+           <th style={{textAlign:'right'}}>Actions</th>
           </tr>
          </thead>
          <tbody>
-          {(batchDetailsModal.deliveries||[])
-           .filter(d => batchDeliveryFilter==='all' || d.status===batchDeliveryFilter)
-           .filter(d => !batchDeliverySearch || d.recipient.toLowerCase().includes(batchDeliverySearch.toLowerCase()))
-           .map(d => {
-            const isUnsub = unsubscribedSet.has(d.recipient.toLowerCase());
+          {(() => {
+           const batchCampaign = data.campaigns?.find(c => c.id === batchDetailsModal.batch?.campaign_id) || selectedCampaign;
+           const batchUnsubList = Array.isArray(batchCampaign?.unsubscribed) ? batchCampaign.unsubscribed : JSON.parse(batchCampaign?.unsubscribed || '[]');
+           const batchUnsubSet = new Set(batchUnsubList.map(e => String(e).toLowerCase().trim()));
+           const filteredList = (batchDetailsModal.deliveries||[])
+            .filter(d => batchDeliveryFilter==='all' || d.status===batchDeliveryFilter)
+            .filter(d => !batchDeliverySearch || d.recipient.toLowerCase().includes(batchDeliverySearch.toLowerCase()));
+
+           if (!filteredList.length) {
             return (
-             <tr key={d.id}>
-              <td><b>{d.recipient}</b></td>
-              <td>
-               <span className={'badge '+(d.status==='accepted'?'green':d.status==='failed'?'danger':d.status==='suppressed'?'warning':'')}>
-                {d.status==='accepted'?'✓ Delivered':d.status==='failed'?'✕ Failed':d.status}
-               </span>
-              </td>
-              <td><span className="badge" style={{background:'#fff',border:'1px solid var(--line)'}}>{d.platform || '—'}</span></td>
-              <td style={{fontSize:'11px',color:d.error?'#a64038':'var(--muted)',maxWidth:'280px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
-               {d.error ? d.error : (d.wire_message_id ? `ID: ${d.wire_message_id}` : 'Accepted by provider')}
-              </td>
-              <td style={{fontSize:'11px',color:'var(--muted)',whiteSpace:'nowrap'}}>{fmt(d.created_at)}</td>
-              <td>
-               {isUnsub ? (
-                <div style={{display:'flex',alignItems:'center',gap:'6px'}}>
-                 <span className="badge" style={{background:'#fee2e2',color:'#991b1b',fontSize:'10px'}}>Unsubscribed</span>
-                 <button 
-                  type="button" 
-                  className="link" 
-                  style={{fontSize:'11px',color:'var(--green)'}}
-                  onClick={()=>resubscribeToCampaign(d.recipient)}
-                 >
-                  Restore
-                 </button>
-                </div>
-               ) : (
-                <button 
-                 type="button" 
-                 className="link danger" 
-                 style={{fontSize:'11px'}}
-                 title="Exclude from future follow-up broadcasts for this campaign"
-                 onClick={async()=>{
-                  if(confirm(`Exclude "${d.recipient}" from future follow-ups for this campaign?`)){
-                   await unsubscribeFromCampaign(d.recipient);
-                  }
-                 }}
-                >
-                 ⊘ Exclude from follow-ups
-                </button>
-               )}
+             <tr>
+              <td colSpan={7} style={{textAlign:'center',padding:'30px',color:'var(--muted)'}}>
+               No {batchDeliveryFilter === 'all' ? '' : batchDeliveryFilter} deliveries recorded for this batch.
               </td>
              </tr>
             );
-           })}
+           }
+
+           return filteredList.map(d => {
+            const isUnsub = batchUnsubSet.has(d.recipient.toLowerCase());
+            const isExpanded = expandedDeliveryId === d.id;
+            const isFailed = d.status === 'failed' || d.status === 'suppressed';
+            const isResending = resendingDeliveryId === d.id;
+            const isDeleting = deletingDeliveryId === d.id;
+            return (
+             <Fragment key={d.id}>
+              <tr 
+               className={`delivery-main-row ${isExpanded ? 'delivery-row-expanded' : ''} ${isFailed ? 'delivery-row-failed' : ''}`}
+               onClick={() => setExpandedDeliveryId(isExpanded ? null : d.id)}
+               style={{cursor:'pointer'}}
+              >
+               <td style={{padding:'10px 4px 10px 10px',textAlign:'center'}} onClick={e=>e.stopPropagation()}>
+                <button
+                 type="button"
+                 className="accordion-chevron-btn"
+                 style={{background:'none',border:'none',padding:'2px',cursor:'pointer',color:isExpanded ? 'var(--green)' : 'var(--muted)',display:'inline-flex',alignItems:'center'}}
+                 title={isExpanded ? 'Collapse row details' : 'Expand error & actions'}
+                 onClick={()=>setExpandedDeliveryId(isExpanded ? null : d.id)}
+                >
+                 {isExpanded ? <FiChevronDown size={15}/> : <FiChevronRight size={15}/>}
+                </button>
+               </td>
+               <td><b>{d.recipient}</b></td>
+               <td>
+                <span className={'badge '+(d.status==='accepted'?'green':d.status==='failed'?'danger':d.status==='suppressed'?'warning':'')}>
+                  {d.status==='accepted'?'✓ Delivered':d.status==='failed'?'✕ Failed':d.status}
+                </span>
+               </td>
+               <td><span className="badge" style={{background:'#fff',border:'1px solid var(--line)'}}>{d.platform || '—'}</span></td>
+               <td 
+                style={{fontSize:'11.5px',color:d.error?'#a64038':'var(--muted)',maxWidth:'240px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}
+                title={d.error ? `${d.error} (Click row to expand)` : 'Click row to expand'}
+               >
+                {d.error ? (
+                 <span style={{display:'inline-flex',alignItems:'center',gap:'4px'}}>
+                  <FiAlertTriangle size={12} style={{flexShrink:0,color:'#dc2626'}}/>
+                  <span style={{overflow:'hidden',textOverflow:'ellipsis'}}>{d.error}</span>
+                 </span>
+                ) : (d.wire_message_id ? `ID: ${d.wire_message_id}` : 'Accepted by provider')}
+               </td>
+               <td style={{fontSize:'11px',color:'var(--muted)',whiteSpace:'nowrap'}}>{fmt(d.created_at)}</td>
+               <td style={{textAlign:'right'}} onClick={e=>e.stopPropagation()}>
+                <div style={{display:'inline-flex',alignItems:'center',gap:'6px',justifyContent:'flex-end'}}>
+                 {isFailed && (
+                  <button
+                   type="button"
+                   className="secondary"
+                   style={{padding:'4px 8px',fontSize:'11px',display:'inline-flex',alignItems:'center',gap:'4px',color:'var(--green)',borderColor:'var(--green)',background:'#fff',fontWeight:'600'}}
+                   disabled={isResending}
+                   onClick={()=>resendDelivery(d)}
+                   title="Resend email to this recipient"
+                  >
+                   <FiRefreshCw size={11} className={isResending ? 'spin' : ''}/>
+                   {isResending ? 'Sending…' : 'Resend'}
+                  </button>
+                 )}
+                 {isUnsub ? (
+                  <div style={{display:'inline-flex',alignItems:'center',gap:'4px'}}>
+                   <span className="badge" style={{background:'#fee2e2',color:'#991b1b',fontSize:'10px'}}>Unsubscribed</span>
+                   <button 
+                    type="button" 
+                    className="link" 
+                    style={{fontSize:'11px',color:'var(--green)',padding:'2px 4px'}}
+                    onClick={()=>resubscribeToCampaign(d.recipient, batchCampaign?.id)}
+                   >
+                    Restore
+                   </button>
+                  </div>
+                 ) : (
+                  <button 
+                   type="button" 
+                   className="secondary" 
+                   style={{padding:'4px 8px',fontSize:'11px',display:'inline-flex',alignItems:'center',gap:'4px',color:'#991b1b',borderColor:'#fca5a5',background:'#fff'}}
+                   title="Exclude from future follow-up broadcasts for this campaign"
+                   onClick={async()=>{
+                    if(confirm(`Exclude "${d.recipient}" from future follow-ups for this campaign?`)){
+                     await unsubscribeFromCampaign(d.recipient, batchCampaign?.id);
+                    }
+                   }}
+                  >
+                   <FiUserX size={11}/> Exclude
+                  </button>
+                 )}
+                 <button 
+                  type="button" 
+                  className="btn-delete btn-delete-sm" 
+                  disabled={isDeleting}
+                  title="Delete this delivery record from batch"
+                  onClick={()=>deleteDelivery(d)}
+                 >
+                  <FiTrash2 size={11}/> Delete
+                 </button>
+                </div>
+               </td>
+              </tr>
+
+              {isExpanded && (
+               <tr className="delivery-accordion-row">
+                <td colSpan={7}>
+                 <div className="delivery-accordion-content">
+                  {d.error ? (
+                   <div className="delivery-error-callout">
+                    <div style={{display:'flex',alignItems:'center',gap:'6px',fontWeight:'700',color:'#991b1b',marginBottom:'6px',fontSize:'12px'}}>
+                     <FiAlertTriangle size={15}/> Error Diagnostics & Response:
+                    </div>
+                    <div className="delivery-error-text">
+                     {d.error}
+                    </div>
+                   </div>
+                  ) : (
+                   <div className="delivery-success-callout" style={{background:'#f0fdf4',border:'1px solid #bbf7d0',borderRadius:'6px',padding:'10px 14px',marginBottom:'12px'}}>
+                    <span style={{fontSize:'12px',color:'#166534',fontWeight:'600'}}>✓ Message accepted by {d.platform || 'provider'}</span>
+                   </div>
+                  )}
+
+                  <div className="delivery-accordion-meta">
+                   <span><b>Recipient:</b> {d.recipient}</span>
+                   <span><b>Platform:</b> {d.platform || 'None'}</span>
+                   {d.wire_message_id && <span><b>Wire Message-ID:</b> <code style={{fontSize:'11px',background:'#fff',padding:'2px 4px',borderRadius:'3px',border:'1px solid var(--line)'}}>{d.wire_message_id}</code></span>}
+                   {d.thread_id && <span><b>Thread ID:</b> <code style={{fontSize:'11px',background:'#fff',padding:'2px 4px',borderRadius:'3px',border:'1px solid var(--line)'}}>{d.thread_id}</code></span>}
+                   <span><b>Created:</b> {fmt(d.created_at)}</span>
+                   <span><b>Status:</b> <span className={'badge ' + (d.status==='accepted' ? 'green' : d.status==='failed' ? 'danger' : 'warning')}>{d.status}</span></span>
+                  </div>
+
+                  <div className="delivery-accordion-actions">
+                   <button
+                    type="button"
+                    className="secondary"
+                    style={{padding:'7px 14px',fontSize:'12px',display:'inline-flex',alignItems:'center',gap:'6px',color:'var(--green)',borderColor:'var(--green)',background:'#fff',fontWeight:'600'}}
+                    disabled={isResending}
+                    onClick={()=>resendDelivery(d)}
+                    title="Resend this campaign message to this recipient"
+                   >
+                    <FiRefreshCw size={13} className={isResending ? 'spin' : ''}/>
+                    {isResending ? 'Resending email…' : 'Resend Email'}
+                   </button>
+
+                   {isUnsub ? (
+                    <button
+                     type="button"
+                     className="secondary"
+                     style={{padding:'7px 14px',fontSize:'12px',display:'inline-flex',alignItems:'center',gap:'6px',color:'var(--green)',background:'#fff'}}
+                     onClick={()=>resubscribeToCampaign(d.recipient, batchCampaign?.id)}
+                    >
+                     ✓ Restore to Active Campaign
+                    </button>
+                   ) : (
+                    <button
+                     type="button"
+                     className="secondary"
+                     style={{padding:'7px 14px',fontSize:'12px',display:'inline-flex',alignItems:'center',gap:'6px',color:'#991b1b',borderColor:'#fca5a5',background:'#fff'}}
+                     title="Exclude this recipient from future follow-up broadcasts for this campaign"
+                     onClick={async()=>{
+                      if(confirm(`Exclude "${d.recipient}" from future follow-up broadcasts for this campaign?`)){
+                       await unsubscribeFromCampaign(d.recipient, batchCampaign?.id);
+                      }
+                     }}
+                    >
+                     <FiUserX size={13}/> Unsubscribe Recipient
+                    </button>
+                   )}
+
+                   <button
+                    type="button"
+                    className="btn-delete"
+                    disabled={isDeleting}
+                    title="Delete this delivery record from batch"
+                    onClick={()=>deleteDelivery(d)}
+                    style={{padding:'7px 14px',fontSize:'12px'}}
+                   >
+                    <FiTrash2 size={13}/> Delete Record
+                   </button>
+                  </div>
+                 </div>
+                </td>
+               </tr>
+              )}
+             </Fragment>
+            );
+           });
+          })()}
          </tbody>
         </table>
        </div>

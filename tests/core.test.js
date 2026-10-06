@@ -313,4 +313,74 @@ test('fcm_tokens table persists device registrations and handles upsert/deletion
   await pg.close();
 });
 
+test('resend and delete failed campaign delivery updates batch metrics and transitions status from failed to accepted', async () => {
+  const pg = new PGlite();
+  await pg.exec(await readFile(new URL('../db/schema.sql', import.meta.url), 'utf8'));
+
+  const campId = randomUUID();
+  await pg.query(`INSERT INTO campaigns(id, name, recipients) VALUES($1, 'Resend Test', '["a@example.com", "b@example.com"]')`, [campId]);
+
+  const batchId = randomUUID();
+  await pg.query(`
+    INSERT INTO campaign_messages(id, campaign_id, subject, text_body, total_recipients, sent_count, failed_count, status)
+    VALUES($1, $2, 'Batch with 1 fail', 'Body', 2, 1, 1, 'partial')
+  `, [batchId, campId]);
+
+  const delivSuccess = randomUUID();
+  await pg.query(`
+    INSERT INTO campaign_deliveries(id, campaign_message_id, recipient, message_uuid, platform, status)
+    VALUES($1, $2, 'a@example.com', $3, 'Resend', 'accepted')
+  `, [delivSuccess, batchId, randomUUID()]);
+
+  const delivFail = randomUUID();
+  await pg.query(`
+    INSERT INTO campaign_deliveries(id, campaign_message_id, recipient, message_uuid, platform, status, error)
+    VALUES($1, $2, 'b@example.com', $3, 'Brevo', 'failed', 'Mailbox full')
+  `, [delivFail, batchId, randomUUID()]);
+
+  // Initial check
+  const initDeliveries = (await pg.query('SELECT * FROM campaign_deliveries WHERE campaign_message_id=$1', [batchId])).rows;
+  assert.equal(initDeliveries.filter(d => d.status === 'failed').length, 1);
+  assert.equal(initDeliveries.filter(d => d.status === 'accepted').length, 1);
+
+  // Simulate Resend: Delivery transitions from failed to accepted
+  const newMsgId = randomUUID();
+  await pg.query(`
+    UPDATE campaign_deliveries
+    SET status='accepted', error=null, platform='Resend', message_uuid=$1
+    WHERE id=$2
+  `, [newMsgId, delivFail]);
+
+  // Update batch metrics
+  await pg.query(`
+    UPDATE campaign_messages
+    SET sent_count = sent_count + 1, failed_count = GREATEST(0, failed_count - 1), status = 'completed'
+    WHERE id = $1
+  `, [batchId]);
+
+  const updatedDeliveries = (await pg.query('SELECT * FROM campaign_deliveries WHERE campaign_message_id=$1', [batchId])).rows;
+  assert.equal(updatedDeliveries.filter(d => d.status === 'failed').length, 0);
+  assert.equal(updatedDeliveries.filter(d => d.status === 'accepted').length, 2);
+
+  const updatedBatch = (await pg.query('SELECT * FROM campaign_messages WHERE id=$1', [batchId])).rows[0];
+  assert.equal(updatedBatch.sent_count, 2);
+  assert.equal(updatedBatch.failed_count, 0);
+  assert.equal(updatedBatch.status, 'completed');
+
+  // Simulate Delete Delivery: Deletes one delivery record from batch
+  await pg.query('DELETE FROM campaign_deliveries WHERE id=$1', [delivSuccess]);
+  await pg.query(`UPDATE campaign_messages SET total_recipients = total_recipients - 1, sent_count = sent_count - 1 WHERE id=$1`, [batchId]);
+
+  const remainingDeliveries = (await pg.query('SELECT * FROM campaign_deliveries WHERE campaign_message_id=$1', [batchId])).rows;
+  assert.equal(remainingDeliveries.length, 1);
+  assert.equal(remainingDeliveries[0].id, delivFail);
+
+  const batchAfterDelete = (await pg.query('SELECT * FROM campaign_messages WHERE id=$1', [batchId])).rows[0];
+  assert.equal(batchAfterDelete.total_recipients, 1);
+  assert.equal(batchAfterDelete.sent_count, 1);
+
+  await pg.close();
+});
+
+
 
