@@ -626,16 +626,30 @@ async function handler(req, { params }) {
             `;
 
             let chosenConn = null;
-            for (const c of eligibleConnections) {
-                const cWindows = usageRows.filter(r => r.id === c.id).map(r => r.window);
+            if (p.connectionId) {
+                const targetCid = uuid(p.connectionId);
+                const match = eligibleConnections.find(c => c.id === targetCid);
+                if (!match) fail(`Selected platform is not enabled or does not verify domain "${senderDomain}".`, 400);
+                const cWindows = usageRows.filter(r => r.id === match.id).map(r => r.window);
                 const dayW = cWindows.find(w => w.name === 'day');
-                const limitVal = (c.daily_limit !== null && c.daily_limit !== undefined) 
-                    ? Number(c.daily_limit) 
-                    : (providers[c.provider]?.daily || 100000);
+                const limitVal = (match.daily_limit !== null && match.daily_limit !== undefined) 
+                    ? Number(match.daily_limit) 
+                    : (providers[match.provider]?.daily || 100000);
                 const used = dayW?.used || 0;
-                if (limitVal - used > 0) {
-                    chosenConn = c;
-                    break;
+                if (limitVal - used <= 0) fail(`Selected platform "${match.label || match.provider}" has exhausted its daily sending quota for today.`, 400);
+                chosenConn = match;
+            } else {
+                for (const c of eligibleConnections) {
+                    const cWindows = usageRows.filter(r => r.id === c.id).map(r => r.window);
+                    const dayW = cWindows.find(w => w.name === 'day');
+                    const limitVal = (c.daily_limit !== null && c.daily_limit !== undefined) 
+                        ? Number(c.daily_limit) 
+                        : (providers[c.provider]?.daily || 100000);
+                    const used = dayW?.used || 0;
+                    if (limitVal - used > 0) {
+                        chosenConn = c;
+                        break;
+                    }
                 }
             }
             if (!chosenConn) fail(`All platforms capable of sending for "${senderDomain}" have exhausted their daily sending quota for today.`, 400);
@@ -743,6 +757,245 @@ async function handler(req, { params }) {
             `;
 
             return json({ ok: true, delivery: updatedDeliv, batch: updatedBatch });
+        }
+        if (path === 'campaigns/resend-all-failed') {
+            await ensureCampaignTables(sql);
+            const batchId = uuid(p.batchId);
+            const [batch] = await sql`SELECT * FROM campaign_messages WHERE id=${batchId}`;
+            if (!batch) fail('Campaign batch not found', 404);
+
+            const [campaign] = await sql`SELECT * FROM campaigns WHERE id=${batch.campaign_id}`;
+            if (!campaign) fail('Campaign not found', 404);
+
+            const [persona] = await sql`SELECT * FROM personas WHERE id=${batch.persona_id}`;
+            if (!persona) fail('Sender persona not found', 404);
+
+            const failedDeliveries = await sql`
+                SELECT * FROM campaign_deliveries
+                WHERE campaign_message_id=${batchId} AND status IN ('failed', 'suppressed')
+                ORDER BY created_at ASC
+            `;
+            if (!failedDeliveries.length) {
+                return json({ ok: true, resentCount: 0, failedCount: 0, message: 'No failed deliveries found in this batch to resend.' });
+            }
+
+            const senderDomain = persona.email.split('@')[1];
+            let eligibleConnections = await sql`
+                SELECT * FROM connections
+                WHERE provider<>'cloudflare' AND enabled=true AND domains ? ${senderDomain}
+                ORDER BY label ASC
+            `;
+            if (!eligibleConnections.length) fail(`No enabled platforms found that have verified the sender domain "${senderDomain}".`, 400);
+
+            if (p.connectionId) {
+                const targetCid = uuid(p.connectionId);
+                const filtered = eligibleConnections.filter(c => c.id === targetCid);
+                if (!filtered.length) fail(`Selected platform is not enabled or does not verify domain "${senderDomain}".`, 400);
+                eligibleConnections = filtered;
+            }
+
+            const connIds = eligibleConnections.map(c => c.id);
+            const usageRows = await sql`
+                SELECT c.id, w.value || jsonb_build_object('used', coalesce(u.used, 0)) AS window 
+                FROM connections c 
+                CROSS JOIN LATERAL jsonb_array_elements(quota_windows(c)) w 
+                LEFT JOIN usage_counters u ON u.key = c.id::text || ':' || (w.value->>'name') || ':' || (w.value->>'start') 
+                WHERE c.id = ANY(${connIds})
+            `;
+
+            const platformPool = [];
+            for (const c of eligibleConnections) {
+                const cWindows = usageRows.filter(r => r.id === c.id).map(r => r.window);
+                const dayW = cWindows.find(w => w.name === 'day');
+                const limitVal = (c.daily_limit !== null && c.daily_limit !== undefined) 
+                    ? Number(c.daily_limit) 
+                    : (providers[c.provider]?.daily || 100000);
+                const used = dayW?.used || 0;
+                const remaining = Math.max(0, limitVal - used);
+                if (remaining > 0) {
+                    platformPool.push({
+                        connection: c,
+                        credentials: decrypt(c.credentials),
+                        remaining,
+                        sentThisBatch: 0
+                    });
+                }
+            }
+
+            if (!platformPool.length) {
+                fail(`All platforms capable of sending for "${senderDomain}" have exhausted their daily sending quota for today.`, 400);
+            }
+
+            const blacklistedRows = await sql`SELECT lower(email) AS email FROM blacklist`;
+            const blacklistSet = new Set(blacklistedRows.map(r => r.email.toLowerCase().trim()));
+            const unsubList = Array.isArray(campaign.unsubscribed) ? campaign.unsubscribed : JSON.parse(campaign.unsubscribed || '[]');
+            const unsubSet = new Set(unsubList.map(e => String(e).toLowerCase().trim()));
+
+            const [inbound] = await sql`SELECT id FROM connections WHERE provider='cloudflare' AND enabled AND domains ? ${senderDomain}`;
+
+            const parentMap = new Map();
+            if (batch.is_follow_up && batch.parent_batch_id) {
+                const parentDeliveries = await sql`
+                    SELECT wire_message_id, recipient FROM campaign_deliveries
+                    WHERE campaign_message_id=${batch.parent_batch_id} AND status='accepted'
+                `;
+                for (const row of parentDeliveries) {
+                    parentMap.set(row.recipient.toLowerCase(), row.wire_message_id);
+                }
+            }
+
+            let resentCount = 0;
+            let stillFailedCount = 0;
+            let currentPoolIdx = 0;
+            const currentStats = (typeof batch.platform_stats === 'object' && batch.platform_stats) ? { ...batch.platform_stats } : {};
+
+            for (const deliv of failedDeliveries) {
+                const recipient = deliv.recipient.toLowerCase().trim();
+                if (blacklistSet.has(recipient)) {
+                    await sql`UPDATE campaign_deliveries SET error='Recipient is in the global blacklist' WHERE id=${deliv.id}`;
+                    stillFailedCount++;
+                    continue;
+                }
+                if (unsubSet.has(recipient)) {
+                    await sql`UPDATE campaign_deliveries SET error='Recipient is in this campaign''s unsubscribed list' WHERE id=${deliv.id}`;
+                    stillFailedCount++;
+                    continue;
+                }
+
+                while (currentPoolIdx < platformPool.length && platformPool[currentPoolIdx].remaining <= 0) {
+                    currentPoolIdx++;
+                }
+
+                if (currentPoolIdx >= platformPool.length) {
+                    await sql`UPDATE campaign_deliveries SET error='Daily quota exhausted on available platforms' WHERE id=${deliv.id}`;
+                    stillFailedCount++;
+                    continue;
+                }
+
+                const activePlatform = platformPool[currentPoolIdx];
+                const c = activePlatform.connection;
+                const credentials = activePlatform.credentials;
+                const platName = c.label || providers[c.provider]?.name || c.provider;
+
+                const token = randomBytes(16).toString('hex');
+                const replyTo = inbound ? `reply+${token}@${senderDomain}` : persona.email;
+                const newMsgId = randomUUID();
+                const threadId = deliv.thread_id || newMsgId;
+                const hdr = {};
+                const parentWire = parentMap.get(recipient);
+                if (parentWire) {
+                    const cleanWire = parentWire.startsWith('<') ? parentWire : `<${parentWire}>`;
+                    hdr['In-Reply-To'] = cleanWire;
+                    hdr['References'] = cleanWire;
+                }
+
+                const payload = {
+                    id: newMsgId,
+                    from: persona.email,
+                    fromName: persona.name,
+                    to: deliv.recipient,
+                    subject: batch.subject,
+                    text: batch.text_body,
+                    html: '',
+                    replyTo,
+                    headers: hdr
+                };
+
+                let reservation = null;
+                try {
+                    buildRequest(c.provider, credentials, payload, c.settings);
+                    const [res] = await sql`SELECT reserve_email(${c.id},${persona.id},${newMsgId},null,${deliv.recipient},${batch.subject},${batch.text_body},'',${JSON.stringify(hdr)}::jsonb,${token},null) AS result`;
+                    reservation = res.result;
+                } catch (e) {
+                    if (e.message && e.message.includes('Quota reached')) {
+                        activePlatform.remaining = 0;
+                        currentPoolIdx++;
+                        stillFailedCount++;
+                        continue;
+                    }
+                    await sql`UPDATE campaign_deliveries SET error=${e.message} WHERE id=${deliv.id}`;
+                    stillFailedCount++;
+                    continue;
+                }
+
+                if (!reservation || reservation.duplicate) {
+                    stillFailedCount++;
+                    continue;
+                }
+
+                const reservationKeys = reservation.reservation || [];
+                try {
+                    await messageStore('insertOutbound', {
+                        message: {
+                            id: newMsgId,
+                            connection_id: c.id,
+                            persona_id: persona.id,
+                            thread_id: threadId,
+                            parent_id: null,
+                            from_email: persona.email,
+                            from_name: persona.name,
+                            to_email: deliv.recipient,
+                            subject: batch.subject,
+                            text_body: batch.text_body,
+                            html_body: '',
+                            headers: hdr,
+                            message_id: null,
+                            reply_token: token,
+                            status: 'sending',
+                            reservation: reservationKeys
+                        }
+                    });
+                } catch (e) {
+                    await sql`SELECT finish_email(${newMsgId}, 'failed', null, null, ${e.message})`;
+                    await sql`UPDATE campaign_deliveries SET error=${e.message} WHERE id=${deliv.id}`;
+                    stillFailedCount++;
+                    continue;
+                }
+
+                try {
+                    const outcome = await sendEmail(c.provider, credentials, payload, c.settings);
+                    await sql`SELECT finish_email(${newMsgId}, 'accepted', ${outcome.providerId}, ${outcome.messageId}, null)`;
+                    await messageStore('updateMessage', { id: newMsgId, status: 'accepted', provider_id: outcome.providerId, message_id: outcome.messageId });
+                    await sql`
+                        UPDATE campaign_deliveries 
+                        SET status='accepted', error=null, platform=${platName}, wire_message_id=${outcome.messageId || outcome.providerId || null}, message_uuid=${newMsgId}, created_at=now()
+                        WHERE id=${deliv.id}
+                    `;
+                    resentCount++;
+                    activePlatform.remaining--;
+                    currentStats[platName] = (currentStats[platName] || 0) + 1;
+                } catch (e) {
+                    const status = e.uncertain === false ? 'failed' : 'unknown';
+                    await sql`SELECT finish_email(${newMsgId}, ${status}, null, null, ${e.message})`;
+                    await messageStore('updateMessage', { id: newMsgId, status, error: e.message });
+                    await sql`
+                        UPDATE campaign_deliveries 
+                        SET message_uuid=${newMsgId}, platform=${platName}, status=${status}, error=${e.message}, created_at=now()
+                        WHERE id=${deliv.id}
+                    `;
+                    stillFailedCount++;
+                }
+            }
+
+            const newSentCount = (batch.sent_count || 0) + resentCount;
+            const newFailedCount = Math.max(0, (batch.failed_count || failedDeliveries.length) - resentCount);
+            const newBatchStatus = newFailedCount === 0 ? 'completed' : 'partial';
+
+            const [updatedBatch] = await sql`
+                UPDATE campaign_messages
+                SET sent_count=${newSentCount}, failed_count=${newFailedCount}, status=${newBatchStatus}, platform_stats=${JSON.stringify(currentStats)}::jsonb
+                WHERE id=${batch.id}
+                RETURNING *
+            `;
+
+            const updatedDeliveries = await sql`
+                SELECT id, recipient, platform, status, error, wire_message_id, thread_id, created_at
+                FROM campaign_deliveries
+                WHERE campaign_message_id=${batch.id}
+                ORDER BY created_at ASC
+            `;
+
+            return json({ ok: true, resentCount, failedCount: stillFailedCount, batch: updatedBatch, deliveries: updatedDeliveries });
         }
         if (path === 'campaigns/delete-delivery') {
             await ensureCampaignTables(sql);

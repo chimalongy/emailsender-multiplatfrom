@@ -54,6 +54,7 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
  const [recipientTab,setRecipientTab]=useState('active'),[unsubInput,setUnsubInput]=useState(''),[addingUnsub,setAddingUnsub]=useState(false);
  const [batchDetailsModal,setBatchDetailsModal]=useState(null),[batchDetailsLoading,setBatchDetailsLoading]=useState(false),[batchDeliveryFilter,setBatchDeliveryFilter]=useState('all'),[batchDeliverySearch,setBatchDeliverySearch]=useState('');
  const [expandedDeliveryId,setExpandedDeliveryId]=useState(null),[resendingDeliveryId,setResendingDeliveryId]=useState(null),[deletingDeliveryId,setDeletingDeliveryId]=useState(null);
+ const [selectedResendProvider,setSelectedResendProvider]=useState(''),[isResendingAll,setIsResendingAll]=useState(false);
  const [calMonth,setCalMonth]=useState(new Date().getMonth()+1);
  const [calYear,setCalYear]=useState(new Date().getFullYear());
  const [calData,setCalData]=useState(null);
@@ -345,6 +346,8 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
   setExpandedDeliveryId(null);
   setResendingDeliveryId(null);
   setDeletingDeliveryId(null);
+  setSelectedResendProvider('');
+  setIsResendingAll(false);
   try{
    const res=await api(`campaigns/batch-details?id=${batchId}`);
    setBatchDetailsModal(res);
@@ -354,13 +357,16 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
    setBatchDetailsLoading(false);
   }
  }
- async function resendDelivery(delivery){
+ async function resendDelivery(delivery,connId){
   if(resendingDeliveryId)return;
   setResendingDeliveryId(delivery.id);
   setError('');
   setNotice('');
   try{
-   const res=await api('campaigns/resend-delivery',{deliveryId:delivery.id});
+   const res=await api('campaigns/resend-delivery',{
+    deliveryId:delivery.id,
+    connectionId:connId!==undefined ? connId : (selectedResendProvider||undefined)
+   });
    setBatchDetailsModal(prev=>{
     if(!prev)return prev;
     const updatedDeliveries=(prev.deliveries||[]).map(d=>{
@@ -386,6 +392,33 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
    setError(err.message||'Failed to resend email');
   }finally{
    setResendingDeliveryId(null);
+  }
+ }
+ async function resendAllFailed(){
+  if(isResendingAll||!batchDetailsModal)return;
+  const failedList=(batchDetailsModal.deliveries||[]).filter(d=>d.status==='failed'||d.status==='suppressed');
+  if(!failedList.length)return;
+  const provLabel=selectedResendProvider?(data.connections.find(c=>c.id===selectedResendProvider)?.label||selectedResendProvider):'Auto Waterfall (Failover)';
+  if(!confirm(`Resend all ${failedList.length} failed recipient(s) using "${provLabel}"?`))return;
+  setIsResendingAll(true);
+  setError('');
+  setNotice('');
+  try{
+   const res=await api('campaigns/resend-all-failed',{
+    batchId:batchDetailsModal.batch?.id,
+    connectionId:selectedResendProvider||undefined
+   });
+   setBatchDetailsModal(prev=>({
+    ...prev,
+    batch:res.batch||prev?.batch,
+    deliveries:res.deliveries||prev?.deliveries
+   }));
+   setNotice(`✅ Resent ${res.resentCount||0} recipient(s) successfully!${res.failedCount?` (${res.failedCount} still failed)`:''}`);
+   refresh().catch(()=>{});
+  }catch(err){
+   setError(err.message||'Failed to resend failed deliveries');
+  }finally{
+   setIsResendingAll(false);
   }
  }
  async function deleteDelivery(delivery){
@@ -1259,7 +1292,60 @@ export default function Dashboard({initialTab='Overview', initialCampaignSlug=nu
        </div>
       ) : (
        <>
-       <div className="mobile-swipe-hint">⇄ Swipe horizontally to view full delivery details</div>
+       {(() => {
+        const failedList = (batchDetailsModal.deliveries || []).filter(d => d.status === 'failed' || d.status === 'suppressed');
+        if (!failedList.length) return null;
+        const senderDomain = (batchDetailsModal.batch?.persona_email || '').split('@')[1]?.toLowerCase().trim();
+        const eligibleConnections = (data.connections || []).filter(c => 
+          c.provider !== 'cloudflare' &&
+          c.enabled &&
+          Array.isArray(c.domains) &&
+          c.domains.map(d => String(d).toLowerCase().trim()).includes(senderDomain)
+        );
+        return (
+          <div className="resend-all-toolbar" style={{display:'flex',flexWrap:'wrap',alignItems:'center',justifyContent:'space-between',gap:'12px',background:'#fff7ed',border:'1px solid #fed7aa',borderRadius:'8px',padding:'10px 14px',marginBottom:'14px'}}>
+            <div style={{display:'flex',alignItems:'center',gap:'8px'}}>
+              <FiAlertTriangle size={18} style={{color:'#c2410c',flexShrink:0}}/>
+              <div>
+                <div style={{fontSize:'12.5px',fontWeight:'700',color:'#9a3412'}}>
+                  {failedList.length} failed delivery {failedList.length === 1 ? 'attempt' : 'attempts'} in this batch
+                </div>
+                <div style={{fontSize:'11px',color:'#c2410c'}}>
+                  Select a specific provider or use automatic waterfall failover to retry failed recipients.
+                </div>
+              </div>
+            </div>
+            <div style={{display:'flex',alignItems:'center',gap:'8px',flexWrap:'wrap'}}>
+              <label style={{fontSize:'11px',fontWeight:'600',color:'#7c2d12',margin:0,whiteSpace:'nowrap'}}>
+                Platform:
+              </label>
+              <select 
+                value={selectedResendProvider} 
+                onChange={e => setSelectedResendProvider(e.target.value)}
+                disabled={isResendingAll}
+                style={{fontSize:'12px',padding:'5px 8px',borderRadius:'5px',border:'1px solid #fdba74',background:'#fff',minWidth:'175px'}}
+              >
+                <option value="">Auto (Waterfall Failover)</option>
+                {eligibleConnections.map(c => (
+                  <option key={c.id} value={c.id}>
+                    {c.label || c.provider} ({c.provider})
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                style={{fontSize:'12px',padding:'6px 14px',background:'#c2410c',color:'#fff',border:'none',borderRadius:'5px',fontWeight:'600',cursor:'pointer',display:'inline-flex',alignItems:'center',gap:'6px'}}
+                disabled={isResendingAll}
+                onClick={resendAllFailed}
+              >
+                <FiRefreshCw size={13} className={isResendingAll ? 'spin' : ''}/>
+                {isResendingAll ? 'Resending All…' : `Resend All Failed (${failedList.length})`}
+              </button>
+            </div>
+          </div>
+        );
+      })()}
+        <div className="mobile-swipe-hint">⇄ Swipe horizontally to view full delivery details</div>
        <div className="delivery-table-wrap">
         <table className="delivery-table">
          <thead>
