@@ -6,7 +6,7 @@ import { db, ensureCampaignTables } from '../../../lib/db.js';
 import { decrypt, encrypt, equal, passwordOK, session, validSession } from '../../../lib/security.js';
 import { providers } from '../../../lib/catalog.js';
 import { buildRequest, inspectDomain, sendEmail } from '../../../lib/providers.js';
-import { domain, email, fail, line, limit, uuid, parseEmailList } from '../../../lib/validation.js';
+import { domain, email, fail, line, limit, uuid, parseEmailList, campaignSlug, matchesCampaign } from '../../../lib/validation.js';
 import { messageStore } from '../../../lib/d1.js';
 import { Client as QStashClient, Receiver as QStashReceiver } from '@upstash/qstash';
 import { dispatchCampaignMessage } from '../../../lib/campaign-dispatcher.js';
@@ -230,6 +230,134 @@ async function handler(req, { params }) {
                 ORDER BY created_at ASC
             `;
             return json({ batch, deliveries });
+        }
+        if (req.method === 'GET' && path === 'campaigns/replies') {
+            const sql = db();
+            await ensureCampaignTables(sql);
+            const url = new URL(req.url);
+            const campaignId = url.searchParams.get('id');
+            const slug = url.searchParams.get('slug');
+
+            let campaign = null;
+            if (campaignId) {
+                const [c] = await sql`SELECT * FROM campaigns WHERE id=${uuid(campaignId)}`;
+                campaign = c;
+            } else if (slug) {
+                const allC = await sql`SELECT * FROM campaigns`;
+                campaign = allC.find(c => matchesCampaign(c, slug));
+            }
+            if (!campaign) fail('Campaign not found', 404);
+
+            const deliveries = await sql`
+                SELECT cd.id, cd.recipient, cd.message_uuid, cd.thread_id, cd.wire_message_id, cd.platform, cd.status, cd.created_at,
+                       cm.id AS batch_id, cm.subject AS batch_subject, cm.persona_id
+                FROM campaign_deliveries cd
+                JOIN campaign_messages cm ON cd.campaign_message_id = cm.id
+                WHERE cm.campaign_id = ${campaign.id}
+            `;
+
+            const threadMap = new Map();
+            const uuidMap = new Map();
+            const wireMap = new Map();
+            const recipientMap = new Map();
+
+            for (const d of deliveries) {
+                if (d.thread_id) threadMap.set(d.thread_id, d);
+                if (d.message_uuid) uuidMap.set(String(d.message_uuid), d);
+                if (d.wire_message_id) {
+                    const cleanWire = String(d.wire_message_id).replace(/^<|>$/g, '').trim().toLowerCase();
+                    if (cleanWire) wireMap.set(cleanWire, d);
+                }
+                if (d.recipient) recipientMap.set(d.recipient.toLowerCase().trim(), d);
+            }
+
+            // Fetch inbound messages from D1 store (paged up to 500)
+            let allInbound = [];
+            let offset = 0;
+            while (true) {
+                const batch = await messageStore('messages', { folder: 'in', offset }).catch(() => []);
+                if (!batch || !batch.length) break;
+                allInbound.push(...batch);
+                if (batch.length < 50) break;
+                offset += 50;
+                if (offset >= 500) break;
+            }
+
+            const matchedReplies = [];
+            const seenMsgIds = new Set();
+
+            for (const m of allInbound) {
+                if (seenMsgIds.has(m.id)) continue;
+
+                let matchedDelivery = null;
+                if (m.thread_id && threadMap.has(m.thread_id)) {
+                    matchedDelivery = threadMap.get(m.thread_id);
+                } else if (m.thread_id && uuidMap.has(m.thread_id)) {
+                    matchedDelivery = uuidMap.get(m.thread_id);
+                } else if (m.parent_id && uuidMap.has(m.parent_id)) {
+                    matchedDelivery = uuidMap.get(m.parent_id);
+                } else {
+                    const inReplyTo = (m.headers?.inReplyTo || '').replace(/^<|>$/g, '').trim().toLowerCase();
+                    if (inReplyTo && wireMap.has(inReplyTo)) {
+                        matchedDelivery = wireMap.get(inReplyTo);
+                    } else {
+                        const refs = Array.isArray(m.headers?.references) ? m.headers.references : [];
+                        for (const ref of refs) {
+                            const cleanRef = String(ref).replace(/^<|>$/g, '').trim().toLowerCase();
+                            if (cleanRef && wireMap.has(cleanRef)) {
+                                matchedDelivery = wireMap.get(cleanRef);
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if (!matchedDelivery && m.from_email && recipientMap.has(m.from_email.toLowerCase())) {
+                    const d = recipientMap.get(m.from_email.toLowerCase());
+                    const sub = (m.subject || '').toLowerCase();
+                    const cName = (campaign.name || '').toLowerCase();
+                    if (sub.includes(cName) || (d.batch_subject && sub.includes(d.batch_subject.toLowerCase().replace(/^re:\s*/i, '')))) {
+                        matchedDelivery = d;
+                    }
+                }
+
+                if (matchedDelivery) {
+                    seenMsgIds.add(m.id);
+                    const isAutoReply = /^(automatic reply|out of office|auto-reply|undeliverable|delivery status notification)/i.test(m.subject || '') ||
+                                        /^(mailer-daemon|postmaster)/i.test(m.from_email || '');
+                    matchedReplies.push({
+                        id: m.id,
+                        thread_id: m.thread_id,
+                        parent_id: m.parent_id,
+                        from_email: m.from_email,
+                        from_name: m.from_name || '',
+                        to_email: m.to_email,
+                        subject: m.subject,
+                        text_body: m.text_body,
+                        html_body: clean(m.html_body),
+                        created_at: m.created_at,
+                        read_at: m.read_at,
+                        status: m.status,
+                        matched_recipient: matchedDelivery.recipient,
+                        matched_batch_id: matchedDelivery.batch_id,
+                        matched_batch_subject: matchedDelivery.batch_subject,
+                        is_auto_reply: isAutoReply
+                    });
+                }
+            }
+
+            matchedReplies.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+            const humanCount = matchedReplies.filter(r => !r.is_auto_reply).length;
+            const autoCount = matchedReplies.filter(r => r.is_auto_reply).length;
+
+            return json({
+                campaign: { id: campaign.id, name: campaign.name, slug: campaignSlug(campaign) },
+                replies: matchedReplies,
+                totalCount: matchedReplies.length,
+                humanCount,
+                autoCount
+            });
         }
         if (req.method === 'GET' && path === 'campaigns/calendar') {
             const sql = db();

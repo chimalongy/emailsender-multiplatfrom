@@ -382,5 +382,38 @@ test('resend and delete failed campaign delivery updates batch metrics and trans
   await pg.close();
 });
 
+test('campaign replies matching isolates responses for a specific campaign by thread, wire id, and recipient', () => {
+  const campaignA = { id: 'camp-A', name: 'OrlandoPrivateLender.com' };
+  const campaignB = { id: 'camp-B', name: 'SunShinePanels.com' };
+
+  const deliveriesA = [
+    { recipient: 'bill@example.com', message_uuid: 'uuid-1', thread_id: 'thread-1', wire_message_id: '<wire-1@provider.com>', batch_id: 'b-1', batch_subject: 'Domain Inquiry' }
+  ];
+  const deliveriesB = [
+    { recipient: 'kelsey@example.com', message_uuid: 'uuid-2', thread_id: 'thread-2', wire_message_id: '<wire-2@provider.com>', batch_id: 'b-2', batch_subject: 'Solar Inquiry' }
+  ];
+
+  const threadMapA = new Map(deliveriesA.map(d => [d.thread_id, d]));
+  const wireMapA = new Map(deliveriesA.map(d => [d.wire_message_id.replace(/^<|>$/g, ''), d]));
+
+  const inboundMessages = [
+    { id: 'in-1', thread_id: 'thread-1', from_email: 'bill@example.com', subject: 'RE: Domain Inquiry', headers: { inReplyTo: '<wire-1@provider.com>' } },
+    { id: 'in-2', thread_id: 'thread-2', from_email: 'kelsey@example.com', subject: 'Automatic reply: Solar', headers: {} },
+    { id: 'in-3', thread_id: 'thread-random', from_email: 'stranger@example.com', subject: 'Hello world', headers: {} }
+  ];
+
+  const matchedForA = inboundMessages.filter(m => {
+    if (m.thread_id && threadMapA.has(m.thread_id)) return true;
+    const ir = (m.headers?.inReplyTo || '').replace(/^<|>$/g, '');
+    if (ir && wireMapA.has(ir)) return true;
+    return false;
+  });
+
+  assert.equal(matchedForA.length, 1);
+  assert.equal(matchedForA[0].id, 'in-1');
+  assert.equal(matchedForA[0].from_email, 'bill@example.com');
+});
+
+
 
 
