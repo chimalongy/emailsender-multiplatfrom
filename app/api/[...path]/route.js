@@ -777,38 +777,35 @@ async function handler(req, { params }) {
                 WHERE c.id = ANY(${connIds})
             `;
 
-            let chosenConn = null;
+            let orderedConnections = [...eligibleConnections];
             if (p.connectionId) {
                 const targetCid = uuid(p.connectionId);
                 const match = eligibleConnections.find(c => c.id === targetCid);
-                if (!match) fail(`Selected platform is not enabled or does not verify domain "${senderDomain}".`, 400);
-                const cWindows = usageRows.filter(r => r.id === match.id).map(r => r.window);
-                const dayW = cWindows.find(w => w.name === 'day');
-                const limitVal = (match.daily_limit !== null && match.daily_limit !== undefined) 
-                    ? Number(match.daily_limit) 
-                    : (providers[match.provider]?.daily || 100000);
-                const used = dayW?.used || 0;
-                if (limitVal - used <= 0) fail(`Selected platform "${match.label || match.provider}" has exhausted its daily sending quota for today.`, 400);
-                chosenConn = match;
-            } else {
-                for (const c of eligibleConnections) {
-                    const cWindows = usageRows.filter(r => r.id === c.id).map(r => r.window);
-                    const dayW = cWindows.find(w => w.name === 'day');
-                    const limitVal = (c.daily_limit !== null && c.daily_limit !== undefined) 
-                        ? Number(c.daily_limit) 
-                        : (providers[c.provider]?.daily || 100000);
-                    const used = dayW?.used || 0;
-                    if (limitVal - used > 0) {
-                        chosenConn = c;
-                        break;
-                    }
+                if (match) {
+                    orderedConnections = [match, ...eligibleConnections.filter(c => c.id !== targetCid)];
                 }
             }
-            if (!chosenConn) fail(`All platforms capable of sending for "${senderDomain}" have exhausted their daily sending quota for today.`, 400);
+
+            const platformPool = [];
+            for (const c of orderedConnections) {
+                const cWindows = usageRows.filter(r => r.id === c.id).map(r => r.window);
+                const dayW = cWindows.find(w => w.name === 'day');
+                const limitVal = (c.daily_limit !== null && c.daily_limit !== undefined) 
+                    ? Number(c.daily_limit) 
+                    : (providers[c.provider]?.daily || 100000);
+                const used = dayW?.used || 0;
+                const remaining = Math.max(0, limitVal - used);
+                if (remaining > 0) {
+                    platformPool.push({
+                        connection: c,
+                        credentials: decrypt(c.credentials),
+                        remaining
+                    });
+                }
+            }
+            if (!platformPool.length) fail(`All platforms capable of sending for "${senderDomain}" have exhausted their daily sending quota for today.`, 400);
 
             const [inbound] = await sql`SELECT id FROM connections WHERE provider='cloudflare' AND enabled AND domains ? ${senderDomain}`;
-            const token = randomBytes(16).toString('hex');
-            const replyTo = inbound ? `reply+${token}@${senderDomain}` : persona.email;
             const newMsgId = randomUUID();
             const threadId = deliv.thread_id || newMsgId;
             const hdr = {};
@@ -823,75 +820,120 @@ async function handler(req, { params }) {
                     hdr['References'] = cleanWire;
                 }
             }
-            const payload = {
-                id: newMsgId,
-                from: persona.email,
-                fromName: persona.name,
-                to: recipient,
-                subject: batch.subject,
-                text: batch.text_body,
-                html: '',
-                replyTo,
-                headers: hdr
-            };
 
-            const credentials = decrypt(chosenConn.credentials);
-            buildRequest(chosenConn.provider, credentials, payload, chosenConn.settings);
-            const [res] = await sql`SELECT reserve_email(${chosenConn.id},${persona.id},${newMsgId},null,${recipient},${batch.subject},${batch.text_body},'',${JSON.stringify(hdr)}::jsonb,${token},null) AS result`;
-            if (res.result.duplicate) fail('Reservation duplicate conflict', 409);
-            const reservationKeys = res.result.reservation || [];
+            let deliverySucceeded = false;
+            let deliveryErrors = [];
+            let updatedDeliv = null;
+            let platName = null;
 
-            try {
-                await messageStore('insertOutbound', {
-                    message: {
-                        id: newMsgId,
-                        connection_id: chosenConn.id,
-                        persona_id: persona.id,
-                        thread_id: threadId,
-                        parent_id: null,
-                        from_email: persona.email,
-                        from_name: persona.name,
-                        to_email: recipient,
-                        subject: batch.subject,
-                        text_body: batch.text_body,
-                        html_body: '',
-                        headers: hdr,
-                        message_id: null,
-                        reply_token: token,
-                        status: 'sending',
-                        reservation: reservationKeys
+            for (const activePlatform of platformPool) {
+                const chosenConn = activePlatform.connection;
+                const credentials = activePlatform.credentials;
+                const currentPlatName = chosenConn.label || providers[chosenConn.provider]?.name || chosenConn.provider;
+                const attemptMsgId = randomUUID();
+                const token = randomBytes(16).toString('hex');
+                const replyTo = inbound ? `reply+${token}@${senderDomain}` : persona.email;
+                const payload = {
+                    id: attemptMsgId,
+                    from: persona.email,
+                    fromName: persona.name,
+                    to: recipient,
+                    subject: batch.subject,
+                    text: batch.text_body,
+                    html: '',
+                    replyTo,
+                    headers: hdr
+                };
+
+                let reservation = null;
+                try {
+                    buildRequest(chosenConn.provider, credentials, payload, chosenConn.settings);
+                    const [res] = await sql`SELECT reserve_email(${chosenConn.id},${persona.id},${attemptMsgId},null,${recipient},${batch.subject},${batch.text_body},'',${JSON.stringify(hdr)}::jsonb,${token},null) AS result`;
+                    reservation = res.result;
+                } catch (e) {
+                    deliveryErrors.push(`[${currentPlatName} reservation]: ${e.message}`);
+                    continue;
+                }
+
+                if (!reservation || reservation.duplicate) {
+                    deliveryErrors.push(`[${currentPlatName}]: Reservation conflict or invalid`);
+                    continue;
+                }
+
+                const reservationKeys = reservation.reservation || [];
+                try {
+                    await messageStore('insertOutbound', {
+                        message: {
+                            id: attemptMsgId,
+                            connection_id: chosenConn.id,
+                            persona_id: persona.id,
+                            thread_id: threadId,
+                            parent_id: null,
+                            from_email: persona.email,
+                            from_name: persona.name,
+                            to_email: recipient,
+                            subject: batch.subject,
+                            text_body: batch.text_body,
+                            html_body: '',
+                            headers: hdr,
+                            message_id: null,
+                            reply_token: token,
+                            status: 'sending',
+                            reservation: reservationKeys
+                        }
+                    });
+                } catch (e) {
+                    await sql`SELECT finish_email(${attemptMsgId}, 'failed', null, null, ${e.message})`;
+                    deliveryErrors.push(`[${currentPlatName} store]: ${e.message}`);
+                    continue;
+                }
+
+                try {
+                    const outcome = await sendEmail(chosenConn.provider, credentials, payload, chosenConn.settings);
+                    await sql`SELECT finish_email(${attemptMsgId}, 'accepted', ${outcome.providerId}, ${outcome.messageId}, null)`;
+                    await messageStore('updateMessage', { id: attemptMsgId, status: 'accepted', provider_id: outcome.providerId, message_id: outcome.messageId });
+
+                    const [resRow] = await sql`
+                        UPDATE campaign_deliveries
+                        SET status='accepted', error=null, platform=${currentPlatName}, wire_message_id=${outcome.messageId || outcome.providerId || null}, message_uuid=${attemptMsgId}, created_at=now()
+                        WHERE id=${deliveryId}
+                        RETURNING *
+                    `;
+                    updatedDeliv = resRow;
+                    platName = currentPlatName;
+                    deliverySucceeded = true;
+                    break;
+                } catch (e) {
+                    const status = e.uncertain === false ? 'failed' : 'unknown';
+                    await sql`SELECT finish_email(${attemptMsgId}, ${status}, null, null, ${e.message})`;
+                    await messageStore('updateMessage', { id: attemptMsgId, status, error: e.message });
+                    deliveryErrors.push(`[${currentPlatName}]: ${e.message}`);
+
+                    if (e.uncertain) {
+                        const [resRow] = await sql`
+                            UPDATE campaign_deliveries 
+                            SET message_uuid=${attemptMsgId}, platform=${currentPlatName}, status='unknown', error=${e.message}, created_at=now()
+                            WHERE id=${deliveryId}
+                            RETURNING *
+                        `;
+                        updatedDeliv = resRow;
+                        platName = currentPlatName;
+                        deliverySucceeded = true;
+                        break;
                     }
-                });
-            } catch (e) {
-                await sql`SELECT finish_email(${newMsgId}, 'failed', null, null, ${e.message})`;
-                throw e;
+                    // Continue to next platform in pool
+                }
             }
 
-            let outcome;
-            const platName = chosenConn.label || providers[chosenConn.provider]?.name || chosenConn.provider;
-            try {
-                outcome = await sendEmail(chosenConn.provider, credentials, payload, chosenConn.settings);
-            } catch (e) {
-                const status = e.uncertain === false ? 'failed' : 'unknown';
-                await sql`SELECT finish_email(${newMsgId}, ${status}, null, null, ${e.message})`;
-                await messageStore('updateMessage', { id: newMsgId, status, error: e.message });
+            if (!deliverySucceeded) {
+                const combinedError = deliveryErrors.join(' | ') || 'All connected platforms failed';
                 await sql`
                     UPDATE campaign_deliveries 
-                    SET message_uuid=${newMsgId}, platform=${platName}, status=${status}, error=${e.message}, created_at=now()
+                    SET status='failed', error=${combinedError.slice(0, 500)}, created_at=now()
                     WHERE id=${deliveryId}
                 `;
-                fail(`Resend failed: ${e.message}`, 400);
+                fail(`Resend failed on all platforms: ${combinedError}`, 400);
             }
-
-            await sql`SELECT finish_email(${newMsgId}, 'accepted', ${outcome.providerId}, ${outcome.messageId}, null)`;
-            await messageStore('updateMessage', { id: newMsgId, status: 'accepted', provider_id: outcome.providerId, message_id: outcome.messageId });
-
-            const [updatedDeliv] = await sql`
-                UPDATE campaign_deliveries
-                SET status='accepted', error=null, platform=${platName}, wire_message_id=${outcome.messageId || outcome.providerId || null}, message_uuid=${newMsgId}, created_at=now()
-                WHERE id=${deliveryId}
-                RETURNING *
-            `;
 
             const currentStats = (typeof batch.platform_stats === 'object' && batch.platform_stats) ? { ...batch.platform_stats } : {};
             currentStats[platName] = (currentStats[platName] || 0) + 1;
@@ -969,7 +1011,8 @@ async function handler(req, { params }) {
                         connection: c,
                         credentials: decrypt(c.credentials),
                         remaining,
-                        sentThisBatch: 0
+                        sentThisBatch: 0,
+                        exhausted: false
                     });
                 }
             }
@@ -1014,115 +1057,168 @@ async function handler(req, { params }) {
                     continue;
                 }
 
-                while (currentPoolIdx < platformPool.length && platformPool[currentPoolIdx].remaining <= 0) {
-                    currentPoolIdx++;
-                }
-
-                if (currentPoolIdx >= platformPool.length) {
-                    await sql`UPDATE campaign_deliveries SET error='Daily quota exhausted on available platforms' WHERE id=${deliv.id}`;
-                    stillFailedCount++;
-                    continue;
-                }
-
-                const activePlatform = platformPool[currentPoolIdx];
-                const c = activePlatform.connection;
-                const credentials = activePlatform.credentials;
-                const platName = c.label || providers[c.provider]?.name || c.provider;
-
-                const token = randomBytes(16).toString('hex');
-                const replyTo = inbound ? `reply+${token}@${senderDomain}` : persona.email;
-                const newMsgId = randomUUID();
-                const threadId = deliv.thread_id || newMsgId;
-                const hdr = {};
-                const parentWire = parentMap.get(recipient);
-                if (parentWire) {
-                    const cleanWire = parentWire.startsWith('<') ? parentWire : `<${parentWire}>`;
-                    hdr['In-Reply-To'] = cleanWire;
-                    hdr['References'] = cleanWire;
-                }
-
-                const payload = {
-                    id: newMsgId,
-                    from: persona.email,
-                    fromName: persona.name,
-                    to: deliv.recipient,
-                    subject: batch.subject,
-                    text: batch.text_body,
-                    html: '',
-                    replyTo,
-                    headers: hdr
-                };
-
-                let reservation = null;
                 try {
-                    buildRequest(c.provider, credentials, payload, c.settings);
-                    const [res] = await sql`SELECT reserve_email(${c.id},${persona.id},${newMsgId},null,${deliv.recipient},${batch.subject},${batch.text_body},'',${JSON.stringify(hdr)}::jsonb,${token},null) AS result`;
-                    reservation = res.result;
-                } catch (e) {
-                    if (e.message && e.message.includes('Quota reached')) {
-                        activePlatform.remaining = 0;
-                        currentPoolIdx++;
+                    const suppressed = await messageStore('suppressed', { email: recipient });
+                    if (suppressed?.blocked) {
                         stillFailedCount++;
+                        await sql`UPDATE campaign_deliveries SET error='Recipient suppressed after a bounce or complaint' WHERE id=${deliv.id}`;
                         continue;
                     }
-                    await sql`UPDATE campaign_deliveries SET error=${e.message} WHERE id=${deliv.id}`;
+                } catch {}
+
+                let deliverySucceeded = false;
+                let recipientErrors = [];
+
+                // Check if all platforms are already exhausted
+                while (currentPoolIdx < platformPool.length && (platformPool[currentPoolIdx].exhausted || platformPool[currentPoolIdx].remaining <= 0)) {
+                    currentPoolIdx++;
+                }
+                if (currentPoolIdx >= platformPool.length) {
+                    currentPoolIdx = 0;
+                }
+
+                const hasAvailablePlatform = platformPool.some(p => !p.exhausted && p.remaining > 0);
+                if (!hasAvailablePlatform) {
+                    await sql`UPDATE campaign_deliveries SET error='Daily quota limit reached across all available platforms' WHERE id=${deliv.id}`;
                     stillFailedCount++;
                     continue;
                 }
 
-                if (!reservation || reservation.duplicate) {
-                    stillFailedCount++;
-                    continue;
-                }
+                const startPoolIdx = currentPoolIdx;
+                for (let attempt = 0; attempt < platformPool.length; attempt++) {
+                    const poolIdx = (startPoolIdx + attempt) % platformPool.length;
+                    const activePlatform = platformPool[poolIdx];
 
-                const reservationKeys = reservation.reservation || [];
-                try {
-                    await messageStore('insertOutbound', {
-                        message: {
-                            id: newMsgId,
-                            connection_id: c.id,
-                            persona_id: persona.id,
-                            thread_id: threadId,
-                            parent_id: null,
-                            from_email: persona.email,
-                            from_name: persona.name,
-                            to_email: deliv.recipient,
-                            subject: batch.subject,
-                            text_body: batch.text_body,
-                            html_body: '',
-                            headers: hdr,
-                            message_id: null,
-                            reply_token: token,
-                            status: 'sending',
-                            reservation: reservationKeys
+                    if (activePlatform.exhausted || activePlatform.remaining <= 0) {
+                        continue;
+                    }
+
+                    const c = activePlatform.connection;
+                    const credentials = activePlatform.credentials;
+                    const platName = c.label || providers[c.provider]?.name || c.provider;
+
+                    const token = randomBytes(16).toString('hex');
+                    const replyTo = inbound ? `reply+${token}@${senderDomain}` : persona.email;
+                    const attemptMsgId = randomUUID();
+                    const threadId = deliv.thread_id || attemptMsgId;
+                    const hdr = {};
+                    const parentWire = parentMap.get(recipient);
+                    if (parentWire) {
+                        const cleanWire = parentWire.startsWith('<') ? parentWire : `<${parentWire}>`;
+                        hdr['In-Reply-To'] = cleanWire;
+                        hdr['References'] = cleanWire;
+                    }
+
+                    const payload = {
+                        id: attemptMsgId,
+                        from: persona.email,
+                        fromName: persona.name,
+                        to: deliv.recipient,
+                        subject: batch.subject,
+                        text: batch.text_body,
+                        html: '',
+                        replyTo,
+                        headers: hdr
+                    };
+
+                    let reservation = null;
+                    try {
+                        buildRequest(c.provider, credentials, payload, c.settings);
+                        const [res] = await sql`SELECT reserve_email(${c.id},${persona.id},${attemptMsgId},null,${deliv.recipient},${batch.subject},${batch.text_body},'',${JSON.stringify(hdr)}::jsonb,${token},null) AS result`;
+                        reservation = res.result;
+                    } catch (e) {
+                        if (e.message && e.message.includes('Quota reached')) {
+                            activePlatform.remaining = 0;
+                            activePlatform.exhausted = true;
                         }
-                    });
-                } catch (e) {
-                    await sql`SELECT finish_email(${newMsgId}, 'failed', null, null, ${e.message})`;
-                    await sql`UPDATE campaign_deliveries SET error=${e.message} WHERE id=${deliv.id}`;
-                    stillFailedCount++;
-                    continue;
+                        recipientErrors.push(`[${platName} reservation]: ${e.message}`);
+                        continue;
+                    }
+
+                    if (!reservation || reservation.duplicate) {
+                        recipientErrors.push(`[${platName}]: Reservation conflict or invalid`);
+                        continue;
+                    }
+
+                    const reservationKeys = reservation.reservation || [];
+                    try {
+                        await messageStore('insertOutbound', {
+                            message: {
+                                id: attemptMsgId,
+                                connection_id: c.id,
+                                persona_id: persona.id,
+                                thread_id: threadId,
+                                parent_id: null,
+                                from_email: persona.email,
+                                from_name: persona.name,
+                                to_email: deliv.recipient,
+                                subject: batch.subject,
+                                text_body: batch.text_body,
+                                html_body: '',
+                                headers: hdr,
+                                message_id: null,
+                                reply_token: token,
+                                status: 'sending',
+                                reservation: reservationKeys
+                            }
+                        });
+                    } catch (e) {
+                        await sql`SELECT finish_email(${attemptMsgId}, 'failed', null, null, ${e.message})`;
+                        recipientErrors.push(`[${platName} store]: ${e.message}`);
+                        continue;
+                    }
+
+                    try {
+                        const outcome = await sendEmail(c.provider, credentials, payload, c.settings);
+                        await sql`SELECT finish_email(${attemptMsgId}, 'accepted', ${outcome.providerId}, ${outcome.messageId}, null)`;
+                        await messageStore('updateMessage', { id: attemptMsgId, status: 'accepted', provider_id: outcome.providerId, message_id: outcome.messageId });
+                        await sql`
+                            UPDATE campaign_deliveries 
+                            SET status='accepted', error=null, platform=${platName}, wire_message_id=${outcome.messageId || outcome.providerId || null}, message_uuid=${attemptMsgId}, created_at=now()
+                            WHERE id=${deliv.id}
+                        `;
+                        resentCount++;
+                        activePlatform.remaining--;
+                        activePlatform.sentThisBatch++;
+                        currentStats[platName] = (currentStats[platName] || 0) + 1;
+                        deliverySucceeded = true;
+                        currentPoolIdx = poolIdx;
+                        break;
+                    } catch (e) {
+                        const status = e.uncertain === false ? 'failed' : 'unknown';
+                        await sql`SELECT finish_email(${attemptMsgId}, ${status}, null, null, ${e.message})`;
+                        await messageStore('updateMessage', { id: attemptMsgId, status, error: e.message });
+                        recipientErrors.push(`[${platName}]: ${e.message}`);
+
+                        const isQuotaError = e.message && (
+                            e.message.includes('429') ||
+                            e.message.toLowerCase().includes('quota') ||
+                            e.message.toLowerCase().includes('rate limit') ||
+                            e.message.toLowerCase().includes('credit')
+                        );
+                        if (isQuotaError) {
+                            activePlatform.remaining = 0;
+                            activePlatform.exhausted = true;
+                        }
+
+                        if (e.uncertain) {
+                            await sql`
+                                UPDATE campaign_deliveries 
+                                SET message_uuid=${attemptMsgId}, platform=${platName}, status=${status}, error=${e.message}, created_at=now()
+                                WHERE id=${deliv.id}
+                            `;
+                            stillFailedCount++;
+                            deliverySucceeded = true;
+                            break;
+                        }
+                    }
                 }
 
-                try {
-                    const outcome = await sendEmail(c.provider, credentials, payload, c.settings);
-                    await sql`SELECT finish_email(${newMsgId}, 'accepted', ${outcome.providerId}, ${outcome.messageId}, null)`;
-                    await messageStore('updateMessage', { id: newMsgId, status: 'accepted', provider_id: outcome.providerId, message_id: outcome.messageId });
+                if (!deliverySucceeded) {
+                    const combinedError = recipientErrors.length ? recipientErrors.join(' | ') : 'All connected platforms exhausted or failed';
                     await sql`
                         UPDATE campaign_deliveries 
-                        SET status='accepted', error=null, platform=${platName}, wire_message_id=${outcome.messageId || outcome.providerId || null}, message_uuid=${newMsgId}, created_at=now()
-                        WHERE id=${deliv.id}
-                    `;
-                    resentCount++;
-                    activePlatform.remaining--;
-                    currentStats[platName] = (currentStats[platName] || 0) + 1;
-                } catch (e) {
-                    const status = e.uncertain === false ? 'failed' : 'unknown';
-                    await sql`SELECT finish_email(${newMsgId}, ${status}, null, null, ${e.message})`;
-                    await messageStore('updateMessage', { id: newMsgId, status, error: e.message });
-                    await sql`
-                        UPDATE campaign_deliveries 
-                        SET message_uuid=${newMsgId}, platform=${platName}, status=${status}, error=${e.message}, created_at=now()
+                        SET error=${combinedError.slice(0, 500)}, created_at=now()
                         WHERE id=${deliv.id}
                     `;
                     stillFailedCount++;

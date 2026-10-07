@@ -9,6 +9,7 @@ import {email,domain,parseEmailList,campaignSlug,matchesCampaign} from '../lib/v
 import {parseLocalDateTimeInTz,formatDateInTz,toLocalDateStr,toLocalDatetimeInputStr} from '../lib/timezone.js';
 import {isFcmConfigured, getPublicFcmConfig, sendFcmPushToAll} from '../lib/fcm.js';
 import {extractBouncedRecipient, isBounceMessage, handleCampaignBounce} from '../lib/bounce-handler.js';
+import {dispatchCampaignMessage} from '../lib/campaign-dispatcher.js';
 test('credentials store as JSON and decrypt accurately',()=>{const a=encrypt({apiKey:'secret'});assert.deepEqual(decrypt(a),{apiKey:'secret'});});
 test('session validates and expires',()=>{const s=session();assert.ok(validSession(s));assert.ok(!validSession('expired'));});
 
@@ -533,7 +534,95 @@ test('handleCampaignBounce automatically removes bounced recipient from campaign
   await pg.close();
 });
 
+test('campaign dispatch waterfalls to next connected platform when provider hits HTTP 429 quota_exceeded', async () => {
+  const originalStoreUrl = process.env.MESSAGE_STORE_URL;
+  process.env.MESSAGE_STORE_URL = 'http://mock-d1.local';
 
+  const pg = new PGlite();
+  await pg.exec(await readFile(new URL('../db/schema.sql', import.meta.url), 'utf8'));
 
+  const sqlTag = async (strings, ...values) => {
+    let query = strings[0];
+    const params = [];
+    for (let i = 0; i < values.length; i++) {
+      params.push(values[i]);
+      query += `$${i + 1}` + strings[i + 1];
+    }
+    const res = await pg.query(query, params);
+    return res.rows;
+  };
 
+  const pid = randomUUID();
+  await pg.query(`INSERT INTO personas(id, name, email) VALUES($1, 'Sender', 'sender@fallbacks.com')`, [pid]);
 
+  const conn1 = randomUUID();
+  const conn2 = randomUUID();
+  // Connection 1: Resend (alphabetically first, will return 429 quota_exceeded)
+  await pg.query(`
+    INSERT INTO connections(id, provider, label, domains, credentials, enabled, daily_limit, monthly_limit, provider_monthly_limit, connected_at, provider_anchor)
+    VALUES($1, 'resend', 'Platform A Resend', '["fallbacks.com"]', $2, true, 100, 1000, 1000, '2026-01-01T12:00:00Z', '2026-01-01T12:00:00Z')
+  `, [conn1, encrypt({ apiKey: 'resend-key' })]);
+
+  // Connection 2: Brevo (alphabetically second, will succeed)
+  await pg.query(`
+    INSERT INTO connections(id, provider, label, domains, credentials, enabled, daily_limit, monthly_limit, provider_monthly_limit, connected_at, provider_anchor)
+    VALUES($1, 'brevo', 'Platform B Brevo', '["fallbacks.com"]', $2, true, 100, 1000, 1000, '2026-01-01T12:00:00Z', '2026-01-01T12:00:00Z')
+  `, [conn2, encrypt({ apiKey: 'brevo-key' })]);
+
+  const campId = randomUUID();
+  await pg.query(`INSERT INTO campaigns(id, name, recipients, unsubscribed) VALUES($1, 'Waterfall Campaign', '["lead1@example.com"]', '[]')`, [campId]);
+
+  const batchId = randomUUID();
+  await pg.query(`
+    INSERT INTO campaign_messages(id, campaign_id, persona_id, subject, text_body, total_recipients, sent_count, failed_count, status)
+    VALUES($1, $2, $3, 'Opportunity', 'Details here', 1, 0, 0, 'queued')
+  `, [batchId, campId, pid]);
+
+  const originalFetch = global.fetch;
+  let resendAttempted = 0;
+  let brevoAttempted = 0;
+
+  global.fetch = async (url) => {
+    const urlStr = String(url);
+    if (urlStr.includes('mock-d1.local')) {
+      return new Response(JSON.stringify({ ok: true, blocked: false }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (urlStr.includes('resend.com')) {
+      resendAttempted++;
+      // Return HTTP 429 quota_exceeded
+      return new Response(JSON.stringify({ message: 'quota_exceeded' }), {
+        status: 429,
+        headers: { 'content-type': 'application/json' }
+      });
+    }
+    if (urlStr.includes('brevo.com')) {
+      brevoAttempted++;
+      // Return HTTP 201 success
+      return new Response(JSON.stringify({ messageId: '<brevo-success@brevo.com>' }), {
+        status: 201,
+        headers: { 'content-type': 'application/json' }
+      });
+    }
+    return new Response('{}', { status: 404 });
+  };
+
+  try {
+    const result = await dispatchCampaignMessage({ campaignMessageId: batchId, sql: sqlTag });
+
+    assert.equal(resendAttempted, 1, 'Resend was attempted first and threw 429');
+    assert.equal(brevoAttempted, 1, 'Brevo was attempted as waterfall fallback and succeeded');
+    assert.equal(result.sentCount, 1);
+    assert.equal(result.failedCount, 0);
+    assert.equal(result.status, 'completed');
+    assert.equal(result.platformStats['Platform B Brevo'], 1);
+
+    const deliveries = (await pg.query(`SELECT * FROM campaign_deliveries WHERE campaign_message_id=$1`, [batchId])).rows;
+    assert.equal(deliveries.length, 1);
+    assert.equal(deliveries[0].status, 'accepted');
+    assert.equal(deliveries[0].platform, 'Platform B Brevo');
+  } finally {
+    global.fetch = originalFetch;
+    process.env.MESSAGE_STORE_URL = originalStoreUrl;
+    await pg.close();
+  }
+});
