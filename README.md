@@ -52,16 +52,15 @@ Clear rejections release quota. Timeouts, malformed responses and server errors 
 
 When Cloudflare receiving is enabled for the sender domain, supported adapters send a unique `reply+<random-token>@yourdomain.com` Reply-To for each outgoing message. Cloudflare must route these addresses to the Worker. A response to that address identifies the exact parent message even when the sending API does not expose a wire Message-ID.
 
-Incoming messages also match stored `In-Reply-To` and `References` IDs. Brevo/Mailgun return useful wire IDs; other provider resource IDs are stored separately and never assumed to be RFC Message-IDs. Outgoing replies send threading headers where documented. Matching groups conversations; it does not authenticate the identity of the sender of a reply.
+Incoming messages also match stored `In-Reply-To` and `References` IDs. Brevo returns useful wire IDs; other provider resource IDs are stored separately and never assumed to be RFC Message-IDs. Outgoing replies send threading headers where documented. Matching groups conversations; it does not authenticate the identity of the sender of a reply.
 
 **Sequenzy supports Reply-To but does not document custom threading headers.** Disable Sequenzy reply tracking to preserve your Cloudflare Reply-To; app-side matching works through the token, while recipient-side threading is not guaranteed. These limits are visible in Compose.
 
 ## Delivery status and suppression
 
-`accepted` means the provider accepted the API request, not that the destination mailbox received it. Signed webhook handlers are implemented for Resend and Mailgun:
+`accepted` means the provider accepted the API request, not that the destination mailbox received it. Signed webhook handlers are implemented for Resend:
 
 - `/api/webhooks/resend` — use the webhook's `whsec_...` signing secret; delivery, bounce, complaint and failure events.
-- `/api/webhooks/mailgun` — use Mailgun's HTTP webhook signing key, not its sending API key; configure delivered, permanent failure and complaint webhooks as JSON.
 
 Save the secret in the relevant connection. Timestamp/signature checks reject invalid requests; repeated events are safe. Bounce/complaint status blocks subsequent app sends to that recipient across platforms. Other providers' delivery webhooks are not implemented in this version; use their dashboards. There is no bulk marketing unsubscribe/contact-management feature. Do not treat this simple correspondence tool as a completed campaign platform.
 
@@ -73,7 +72,7 @@ The Worker imposes a **4 MiB raw-message limit**, and **150,000 characters per t
 
 ## Domain setup and verified scope
 
-Read **docs/PROVIDERS.md** for all eight platforms and source links reviewed on 23 September 2026. Use provider-generated DNS values, not example DKIM values. API-based domain inspection is included for Brevo, Resend (domain ID needed), Mailgun and Cloudflare zone status. The other connections use the documented dashboard workflow. Setup checks do not send test emails or modify DNS. Enablement is an explicit admin attestation after verification; the provider is the final authority when sending.
+Read **docs/PROVIDERS.md** for all supported platforms and source links. Use provider-generated DNS values, not example DKIM values. API-based domain inspection is included for Brevo, Resend (domain ID needed), and Cloudflare zone status. The other connections use the documented dashboard workflow. Setup checks do not send test emails or modify DNS. Enablement is an explicit admin attestation after verification; the provider is the final authority when sending.
 
 Cloudflare receiving must retain the receiving MX records. Sender return-path MX records often belong to a subdomain and can coexist. Maintain one SPF TXT record per hostname; merge authorized includes only where needed and observe SPF's lookup limit. DKIM selectors may coexist, but never overwrite a different provider's record at the same hostname. Use DNS-only CNAME records when required by the provider.
 

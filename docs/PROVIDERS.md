@@ -6,7 +6,6 @@ Reviewed 23 September 2026 against official documentation. Plans and account app
 |---|---:|---:|---|
 | Brevo | 300 | 9,000 | API key |
 | Resend | 100 | 3,000 | API key; optional domain ID and webhook secret |
-| Mailgun | 100 | 3,000 | API key + sending domain + US/EU; optional webhook key |
 | Elastic Email | 100 | 3,000 | API key with SendHttp |
 | Sequenzy | No fixed app cap | 2,500 | Bearer API key |
 | Mailtrap | 150 | 4,000 | API token |
@@ -15,7 +14,7 @@ Reviewed 23 September 2026 against official documentation. Plans and account app
 | Epostix | 100 | 3,000 | Bearer API key (tix_live_) |
 | Anypost | 100 | 3,000 | Bearer API key (ap_) |
 
-Brevo/Mailgun 30-day totals are calculations from daily allowances, not independent monthly entitlements. A 31-day month differs from a 30-day planning period. External account usage is not fetched by this project.
+Brevo 30-day totals are calculations from daily allowances, not independent monthly entitlements. A 31-day month differs from a 30-day planning period. External account usage is not fetched by this project.
 
 ## Brevo
 
@@ -32,14 +31,6 @@ Open Domains → Add domain. Add the shown DKIM and sending return-path records 
 The adapter calls `POST https://api.resend.com/emails` using Bearer authentication, Reply-To, headers and an idempotency key. Optional signed delivery events use `/api/webhooks/resend`. Free allowance: 100/day and 3,000/month.
 
 Sources: [Domain setup](https://resend.com/docs/dashboard/domains/introduction), [Send API](https://resend.com/docs/api-reference/emails/send-email), [Pricing](https://resend.com/pricing).
-
-## Mailgun
-
-Add a custom domain under Sending → Domains. Select its US/EU region, publish the sending DNS records and verify them. Save that domain, its authorized API key and region. Retain Cloudflare's receiving MX records; do not set Mailgun receiving MX on the same hostname. The sandbox has recipient restrictions and is not your production custom-domain connection.
-
-The adapter uses multipart `POST /v3/{domain}/messages`, HTTP Basic authentication (`api` plus key), and `h:` message headers. Domain checks use the selected region. Optional Mailgun webhook signing uses the account's HTTP webhook signing key. Free allowance: 100/day.
-
-Sources: [Domains](https://documentation.mailgun.com/docs/mailgun/user-manual/domains/domains), [Messages](https://documentation.mailgun.com/docs/mailgun/api-reference/send/mailgun/messages), [Free plan](https://help.mailgun.com/hc/en-us/articles/203068914-What-does-the-Free-plan-offer).
 
 ## Elastic Email
 

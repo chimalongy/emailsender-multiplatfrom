@@ -130,13 +130,6 @@ async function webhook(provider, req, raw) {
         if (status === 'bounced' || status === 'complained') {
             bounceRecipient = (Array.isArray(event.data?.to) ? event.data.to[0] : event.data?.to) || event.data?.recipient || event.data?.email;
         }
-    } else if (provider === 'mailgun') {
-        event = JSON.parse(raw); const s = event.signature || {};
-        if (Math.abs(Date.now() / 1000 - Number(s.timestamp)) > 300 || !equal(createHmac('sha256', credentials.webhookSecret).update(`${s.timestamp}${s.token}`).digest('hex'), s.signature || '')) fail('Invalid signature', 401);
-        const e = event['event-data']; id = e?.message?.headers?.['message-id']; status = ({ delivered: 'delivered', complained: 'complained', failed: e?.severity === 'permanent' ? 'bounced' : undefined })[e?.event];
-        if (status === 'bounced' || status === 'complained') {
-            bounceRecipient = e?.recipient;
-        }
     } else fail('Webhook not supported', 404);
     if (id && status) await messageStore('webhookUpdate',{connectionId:c.id,providerId:id,status});
     if (bounceRecipient && status === 'bounced') {
@@ -529,7 +522,6 @@ async function handler(req, { params }) {
             const creds = old ? decrypt(old.credentials) : {};
             for (const k of providers[p.provider].fields) if (typeof p.credentials?.[k] === 'string' && p.credentials[k].trim()) creds[k] = line(p.credentials[k], k, 2000);
             if (p.provider !== 'cloudflare' && !creds.apiKey) fail('API key required');
-            if (p.provider === 'mailgun') creds.sendingDomain = domain(creds.sendingDomain);
             const domains = [...new Set(String(p.domains || '').split(',').map(x => domain(x.trim())))];
             const settings = { region: p.region === 'eu' ? 'eu' : 'us' };
             const cycle = ['calendar', '30days', 'billing'].includes(p.providerCycle) ? p.providerCycle : 'calendar';
